@@ -13,15 +13,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import {getErrorSummary} from '@/common/error/ErrorUtils';
 import LoadingStateScreen from '@/common/loading/LoadingStateScreen';
+import useSettingsContext from '@/settings/useSettingsContext';
 import {FallbackProps} from 'react-error-boundary';
 
-export default function DemoErrorFallback(_props: FallbackProps) {
+export default function DemoErrorFallback({error}: FallbackProps) {
+  const {settings} = useSettingsContext();
+  const summary = getErrorSummary(error);
+
   return (
     <LoadingStateScreen
       title="Well, this is embarrassing..."
-      description="This demo is not optimized for your device. Please try again on a different device with a larger screen."
-      linkProps={{to: '..', label: 'Back to homepage'}}
-    />
+      description="The demo hit an unexpected error before the page could finish loading."
+      linkProps={{to: '..', label: 'Back to homepage'}}>
+      <div className="rounded-lg border border-white/15 bg-white/5 px-4 py-3 text-left text-sm text-[#A7B3BF]">
+        <div>Reason: {summary}</div>
+        <div className="mt-2 break-all">
+          Video API Endpoint:{' '}
+          {settings.videoAPIEndpoint || '(same origin / proxied through frontend)'}
+        </div>
+        <div className="mt-1 break-all">
+          Inference API Endpoint:{' '}
+          {settings.inferenceAPIEndpoint ||
+            '(same origin / proxied through frontend)'}
+        </div>
+      </div>
+    </LoadingStateScreen>
   );
 }

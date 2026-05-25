@@ -7,6 +7,19 @@ input AddPointsInput {
   points: [[Float!]!]!
 }
 
+input AddPointsBatchObjectInput {
+  objectId: Int!
+  labels: [Int!]!
+  points: [[Float!]!]!
+}
+
+input AddPointsBatchInput {
+  sessionId: String!
+  frameIndex: Int!
+  clearOldPoints: Boolean!
+  objects: [AddPointsBatchObjectInput!]!
+}
+
 type CancelPropagateInVideo {
   success: Boolean!
 }
@@ -41,6 +54,7 @@ type Mutation {
   startSession(input: StartSessionInput!): StartSession!
   closeSession(input: CloseSessionInput!): CloseSession!
   addPoints(input: AddPointsInput!): RLEMaskListOnFrame!
+  addPointsBatch(input: AddPointsBatchInput!): RLEMaskListOnFrame!
   clearPointsInFrame(input: ClearPointsInFrameInput!): RLEMaskListOnFrame!
   clearPointsInVideo(input: ClearPointsInVideoInput!): ClearPointsInVideo!
   removeObject(input: RemoveObjectInput!): [RLEMaskListOnFrame!]!

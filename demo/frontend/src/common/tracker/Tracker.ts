@@ -21,6 +21,11 @@ import {RLEObject} from '@/jscocotools/mask';
 
 export type Point = [x: number, y: number];
 
+export type FrameRange = {
+  startFrame: number;
+  endFrameExclusive: number;
+};
+
 export type SegmentationPoint = [...point: Point, label: 0 | 1];
 
 export type FramePoints = Array<SegmentationPoint> | undefined;
@@ -48,6 +53,29 @@ export type BaseTracklet = Omit<Tracklet, 'masks'> & {
   masks: DatalessMask[];
 };
 
+export type AnnotationExportAnnotation = {
+  object_id: number;
+  object_name: string;
+  rle: RLEObject;
+  points: SegmentationPoint[];
+};
+
+export type AnnotationExportFrame = {
+  frame_index: number;
+  annotations: AnnotationExportAnnotation[];
+};
+
+export type AnnotationExportPayload = {
+  session_id: string | null;
+  export_every_n_frames: number;
+  export_sampling_mode?: 'frames' | 'seconds' | 'frame_list';
+  export_every_n_seconds?: number;
+  export_source_fps?: number;
+  export_frame_list_file_name?: string;
+  export_frame_indices?: number[];
+  frames: AnnotationExportFrame[];
+};
+
 export type StreamingState =
   | 'none'
   | 'required'
@@ -69,7 +97,13 @@ export interface ITracker {
   ): Promise<void>;
   clearPointsInFrame(frameIndex: number, objectId: number): Promise<void>;
   clearPointsInVideo(): Promise<void>;
-  streamMasks(frameIndex: number): Promise<void>;
+  streamMasks(frameIndex: number, frameRange?: FrameRange): Promise<void>;
+  exportAnnotations(
+    everyNFrames: number,
+    onlyAnnotatedFrames: boolean,
+    frameRange?: FrameRange,
+  ): Promise<void>;
+  trimTrackletsToRange(frameRange: FrameRange): Promise<void>;
   abortStreamMasks(): void;
   enableStats(): void;
 }
@@ -93,7 +127,16 @@ export abstract class Tracker implements ITracker {
     objectId: number,
   ): Promise<void>;
   abstract clearPointsInVideo(): Promise<void>;
-  abstract streamMasks(frameIndex: number): Promise<void>;
+  abstract streamMasks(
+    frameIndex: number,
+    frameRange?: FrameRange,
+  ): Promise<void>;
+  abstract exportAnnotations(
+    everyNFrames: number,
+    onlyAnnotatedFrames: boolean,
+    frameRange?: FrameRange,
+  ): Promise<void>;
+  abstract trimTrackletsToRange(frameRange: FrameRange): Promise<void>;
   abstract abortStreamMasks(): void;
   abstract enableStats(): void;
 

@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 import EffectsCarousel from '@/common/components/effects/EffectsCarousel';
-import {backgroundEffects} from '@/common/components/effects/EffectsUtils';
-import useVideoEffect from '@/common/components/video/editor/useVideoEffect';
 import {
-  EffectIndex,
+  backgroundEffects,
   effectPresets,
-} from '@/common/components/video/effects/Effects';
+} from '@/common/components/effects/EffectsUtils';
+import useVideoEffect from '@/common/components/video/editor/useVideoEffect';
+import {EffectIndex} from '@/common/components/video/effects/Effects';
 import {ListBoxes, MagicWand, MagicWandFilled} from '@carbon/icons-react';
 import {useCallback, useRef, useState} from 'react';
 import {Button} from 'react-daisyui';

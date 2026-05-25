@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import {convertMaskToRGBA} from '@/common/utils/MaskUtils';
+import {RLEObject, decode} from '@/jscocotools/mask';
 import invariant from 'invariant';
 import {Group} from 'pts';
 import {EffectFrameContext} from './Effect';
@@ -98,6 +100,44 @@ export function copyCanvasContent(
   const tempCtx = tempCanvas.getContext('2d');
   tempCtx?.putImageData(previousContent, 0, 0);
   return tempCanvas;
+}
+
+export function createMaskCanvas(maskBitmap: ImageBitmap | RLEObject): OffscreenCanvas {
+  if (typeof ImageBitmap !== 'undefined' && maskBitmap instanceof ImageBitmap) {
+    const canvas = new OffscreenCanvas(maskBitmap.width, maskBitmap.height);
+    const ctx = canvas.getContext('2d');
+    invariant(ctx != null, 'context cannot be null');
+    ctx.drawImage(maskBitmap, 0, 0);
+    return canvas;
+  }
+
+  const decodedMask = decode([maskBitmap as RLEObject]);
+  const rgbaMask = convertMaskToRGBA(decodedMask.data as Uint8Array);
+
+  const sourceCanvas = new OffscreenCanvas(
+    decodedMask.shape[0],
+    decodedMask.shape[1],
+  );
+  const sourceCtx = sourceCanvas.getContext('2d');
+  invariant(sourceCtx != null, 'context cannot be null');
+  sourceCtx.putImageData(
+    new ImageData(rgbaMask, decodedMask.shape[0], decodedMask.shape[1]),
+    0,
+    0,
+  );
+
+  const canvas = new OffscreenCanvas(
+    decodedMask.shape[1],
+    decodedMask.shape[0],
+  );
+  const ctx = canvas.getContext('2d');
+  invariant(ctx != null, 'context cannot be null');
+  ctx.save();
+  ctx.rotate(Math.PI / 2);
+  ctx.scale(1, -1);
+  ctx.drawImage(sourceCanvas, 0, 0);
+  ctx.restore();
+  return canvas;
 }
 
 export function isInvalidMask(bound: number[][] | Group) {

@@ -167,7 +167,9 @@ export async function getDataURLFromImageData(
     return '';
   }
 
-  ctx?.putImageData(imageData, 0, 0);
+  const canvas2dCtx =
+    ctx as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  canvas2dCtx.putImageData(imageData, 0, 0);
 
   if (canvas instanceof OffscreenCanvas) {
     const blob = await canvas.convertToBlob();

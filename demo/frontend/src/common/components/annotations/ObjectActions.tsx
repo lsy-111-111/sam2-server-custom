@@ -20,6 +20,7 @@ import {
   activeTrackletObjectIdAtom,
   isPlayingAtom,
   isStreamingAtom,
+  trackletObjectNamesAtom,
 } from '@/demo/atoms';
 import {
   AddFilled,
@@ -55,6 +56,7 @@ export default function ObjectActions({objectId, active}: Props) {
     activeTrackletObjectIdAtom,
   );
   const isStreaming = useAtomValue(isStreamingAtom);
+  const setObjectNames = useAtom(trackletObjectNamesAtom)[1];
   const isPlaying = useAtom(isPlayingAtom);
 
   const video = useVideo();
@@ -73,6 +75,11 @@ export default function ObjectActions({objectId, active}: Props) {
         video?.pause();
       }
       await video?.deleteTracklet(objectId);
+      setObjectNames(prev => {
+        const next = {...prev};
+        delete next[objectId];
+        return next;
+      });
     } catch (error) {
       reportError(error);
     } finally {

@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 import DefaultVideoGalleryModalTrigger from '@/common/components/gallery/DefaultVideoGalleryModalTrigger';
+import ServerVideoBrowser from '@/common/components/gallery/ServerVideoBrowser';
+import useUploadSession from '@/common/components/upload/useUploadSession';
 import {
   frameIndexAtom,
   sessionAtom,
+  trackletObjectNamesAtom,
+  uploadErrorAtom,
   uploadingStateAtom,
   VideoData,
 } from '@/demo/atoms';
@@ -24,7 +28,7 @@ import {spacing} from '@/theme/tokens.stylex';
 import {Close} from '@carbon/icons-react';
 import stylex from '@stylexjs/stylex';
 import {useSetAtom} from 'jotai';
-import {ComponentType, useCallback, useRef} from 'react';
+import {ComponentType, useCallback, useRef, useState} from 'react';
 import {Modal} from 'react-daisyui';
 import DemoVideoGallery from './DemoVideoGallery';
 
@@ -82,14 +86,19 @@ export default function DemoVideoGalleryModal({
   onUploadVideoError,
 }: Props) {
   const modalRef = useRef<HTMLDialogElement | null>(null);
+  const [view, setView] = useState<'gallery' | 'serverBrowser'>('gallery');
 
+  const {clearUploadSession} = useUploadSession();
   const setFrameIndex = useSetAtom(frameIndexAtom);
   const setUploadingState = useSetAtom(uploadingStateAtom);
+  const setUploadError = useSetAtom(uploadErrorAtom);
   const setSession = useSetAtom(sessionAtom);
+  const setTrackletObjectNames = useSetAtom(trackletObjectNamesAtom);
 
   function openModal() {
     const modal = modalRef.current;
     if (modal != null) {
+      setView('gallery');
       modal.style.display = 'grid';
       modal.showModal();
     }
@@ -98,6 +107,7 @@ export default function DemoVideoGalleryModal({
   function closeModal() {
     const modal = modalRef.current;
     if (modal != null) {
+      setView('gallery');
       modal.close();
       modal.style.display = 'none';
     }
@@ -107,14 +117,29 @@ export default function DemoVideoGalleryModal({
     async (video: VideoData, isUpload?: boolean) => {
       closeModal();
       setFrameIndex(0);
-      onSelect?.(video, isUpload);
-      setUploadingState('default');
       setSession(null);
+      setTrackletObjectNames({});
+
+      if (isUpload) {
+        setUploadError(null);
+      } else {
+        await clearUploadSession();
+      }
+
+      onSelect?.(video, isUpload);
     },
-    [setFrameIndex, onSelect, setUploadingState, setSession],
+    [
+      clearUploadSession,
+      onSelect,
+      setFrameIndex,
+      setSession,
+      setTrackletObjectNames,
+      setUploadError,
+    ],
   );
 
   function handleUploadVideoStart() {
+    setUploadError(null);
     setUploadingState('uploading');
     closeModal();
   }
@@ -133,13 +158,21 @@ export default function DemoVideoGalleryModal({
         </div>
         <Modal.Body>
           <div {...stylex.props(styles.galleryContainer)}>
-            <DemoVideoGallery
-              showUploadInGallery={showUploadInGallery}
-              onSelect={video => handleSelect(video)}
-              onUpload={video => handleSelect(video, true)}
-              onUploadStart={handleUploadVideoStart}
-              onUploadError={onUploadVideoError}
-            />
+            {view === 'gallery' ? (
+              <DemoVideoGallery
+                showUploadInGallery={showUploadInGallery}
+                onSelect={video => void handleSelect(video)}
+                onSelectServer={() => setView('serverBrowser')}
+                onUpload={video => void handleSelect(video, true)}
+                onUploadStart={handleUploadVideoStart}
+                onUploadError={onUploadVideoError}
+              />
+            ) : (
+              <ServerVideoBrowser
+                onBack={() => setView('gallery')}
+                onImport={video => void handleSelect(video, true)}
+              />
+            )}
           </div>
         </Modal.Body>
       </Modal>

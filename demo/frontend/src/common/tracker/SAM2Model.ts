@@ -17,6 +17,10 @@ import {generateThumbnail} from '@/common/components/video/editor/VideoEditorUti
 import VideoWorkerContext from '@/common/components/video/VideoWorkerContext';
 import Logger from '@/common/logger/Logger';
 import {
+  SAM2ModelAddNewPointsBatchMutation,
+  SAM2ModelAddNewPointsBatchMutation$data,
+} from '@/common/tracker/__generated__/SAM2ModelAddNewPointsBatchMutation.graphql';
+import {
   SAM2ModelAddNewPointsMutation,
   SAM2ModelAddNewPointsMutation$data,
 } from '@/common/tracker/__generated__/SAM2ModelAddNewPointsMutation.graphql';
@@ -27,7 +31,9 @@ import {SAM2ModelCloseSessionMutation} from '@/common/tracker/__generated__/SAM2
 import {SAM2ModelRemoveObjectMutation} from '@/common/tracker/__generated__/SAM2ModelRemoveObjectMutation.graphql';
 import {SAM2ModelStartSessionMutation} from '@/common/tracker/__generated__/SAM2ModelStartSessionMutation.graphql';
 import {
+  AnnotationExportPayload,
   BaseTracklet,
+  FrameRange,
   Mask,
   SegmentationPoint,
   StreamingState,
@@ -37,6 +43,8 @@ import {
 import {TrackerOptions} from '@/common/tracker/Trackers';
 import {
   ClearPointsInVideoResponse,
+  CloseSessionResponse,
+  ExportAnnotationsResponse,
   SessionStartFailedResponse,
   SessionStartedResponse,
   StreamingCompletedResponse,
@@ -45,6 +53,7 @@ import {
   TrackletCreatedResponse,
   TrackletDeletedResponse,
   TrackletsUpdatedResponse,
+  TrimTrackletsToRangeResponse,
 } from '@/common/tracker/TrackerTypes';
 import {convertMaskToRGBA} from '@/common/utils/MaskUtils';
 import multipartStream from '@/common/utils/MultipartStream';
@@ -62,8 +71,32 @@ import {
 import {THEME_COLORS} from '@/theme/colors';
 import invariant from 'invariant';
 import {IEnvironment, commitMutation, graphql} from 'relay-runtime';
+import {serializeError} from 'serialize-error';
 
 type Options = Pick<TrackerOptions, 'inferenceEndpoint'>;
+
+const POINT_UPDATE_BATCH_DELAY_MS = 16;
+
+type PointUpdateResolver = {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
+
+type PendingPointUpdate = {
+  sessionId: string;
+  frameIndex: number;
+  objectId: number;
+  points: SegmentationPoint[];
+  normalizedPoints: number[][];
+  labels: number[];
+  updateThumbnails?: boolean;
+  shouldGoToFrame?: boolean;
+  resolvers: PointUpdateResolver[];
+};
+
+type AddPointsResult =
+  | SAM2ModelAddNewPointsMutation$data['addPoints']
+  | SAM2ModelAddNewPointsBatchMutation$data['addPointsBatch'];
 
 type Session = {
   id: string | null;
@@ -92,6 +125,8 @@ export class SAM2Model extends Tracker {
     tracklets: {},
   };
   private _streamingState: StreamingState = 'none';
+  private _pendingPointUpdates: Map<string, PendingPointUpdate> = new Map();
+  private _pointUpdateFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   private _emptyMask: RLEObject | null = null;
 
@@ -122,6 +157,22 @@ export class SAM2Model extends Tracker {
     this._updateStreamingState('none', true);
 
     return new Promise(resolve => {
+      const failSessionStart = (error: unknown) => {
+        const sessionError =
+          error instanceof Error
+            ? error
+            : new Error(
+                typeof error === 'string'
+                  ? error
+                  : 'Failed to start session.',
+              );
+        Logger.error(sessionError);
+        this._sendResponse<SessionStartFailedResponse>('sessionStartFailed', {
+          error: serializeError(sessionError),
+        });
+        resolve();
+      };
+
       try {
         commitMutation<SAM2ModelStartSessionMutation>(this._environment, {
           mutation: graphql`
@@ -136,8 +187,17 @@ export class SAM2Model extends Tracker {
               path: videoPath,
             },
           },
-          onCompleted: response => {
-            const {sessionId} = response.startSession;
+          onCompleted: (response, errors) => {
+            const sessionId = response.startSession?.sessionId;
+            if (errors != null && errors.length > 0) {
+              failSessionStart(errors.map(({message}) => message).join('\n'));
+              return;
+            }
+            if (sessionId == null) {
+              failSessionStart('The backend did not return a session id.');
+              return;
+            }
+
             this._session.id = sessionId;
 
             this._sendResponse<SessionStartedResponse>('sessionStarted', {
@@ -153,32 +213,24 @@ export class SAM2Model extends Tracker {
             resolve();
           },
           onError: error => {
-            Logger.error(error);
-            this._sendResponse<SessionStartFailedResponse>(
-              'sessionStartFailed',
-            );
-            resolve();
+            failSessionStart(error);
           },
         });
       } catch (error) {
-        Logger.error(error);
-        this._sendResponse<SessionStartFailedResponse>('sessionStartFailed');
-        resolve();
+        failSessionStart(error);
       }
     });
   }
 
   public closeSession(): Promise<void> {
     const sessionId = this._session.id;
-
-    // Do not call cleanup before retrieving the session id because cleanup
-    // will reset the session id. If the order would be changed, it would
-    // never execute the closeSession mutation.
-    this._cleanup();
-
     if (sessionId === null) {
+      this._sendResponse<CloseSessionResponse>('closeSession', {
+        isSuccessful: true,
+      });
       return Promise.resolve();
     }
+
     return new Promise((resolve, reject) => {
       commitMutation<SAM2ModelCloseSessionMutation>(this._environment, {
         mutation: graphql`
@@ -196,13 +248,23 @@ export class SAM2Model extends Tracker {
         onCompleted: response => {
           const {success} = response.closeSession;
           if (success === false) {
+            this._sendResponse<CloseSessionResponse>('closeSession', {
+              isSuccessful: false,
+            });
             reject(new Error('Failed to close session'));
             return;
           }
+          this._cleanup();
+          this._sendResponse<CloseSessionResponse>('closeSession', {
+            isSuccessful: true,
+          });
           resolve();
         },
         onError: error => {
           Logger.error(error);
+          this._sendResponse<CloseSessionResponse>('closeSession', {
+            isSuccessful: false,
+          });
           reject(error);
         },
       });
@@ -218,9 +280,16 @@ export class SAM2Model extends Tracker {
         -1,
       ) + 1;
 
+    const usedColors = new Set(
+      Object.values(this._session.tracklets).map(tracklet => tracklet.color),
+    );
+    const color =
+      THEME_COLORS.find(themeColor => !usedColors.has(themeColor)) ??
+      THEME_COLORS[nextId % THEME_COLORS.length];
+
     const newTracklet = {
       id: nextId,
-      color: THEME_COLORS[nextId % THEME_COLORS.length],
+      color,
       thumbnail: null,
       points: [],
       masks: [],
@@ -335,49 +404,15 @@ export class SAM2Model extends Tracker {
     if (points.length === 0) {
       return this.clearPointsInFrame(frameIndex, objectId);
     }
-    return new Promise((resolve, reject) => {
-      const normalizedPoints = points.map(p => [
-        p[0] / this._context.width,
-        p[1] / this._context.height,
-      ]);
-      const labels = points.map(p => p[2]);
-      commitMutation<SAM2ModelAddNewPointsMutation>(this._environment, {
-        mutation: graphql`
-          mutation SAM2ModelAddNewPointsMutation($input: AddPointsInput!) {
-            addPoints(input: $input) {
-              frameIndex
-              rleMaskList {
-                objectId
-                rleMask {
-                  counts
-                  size
-                }
-              }
-            }
-          }
-        `,
-        variables: {
-          input: {
-            sessionId,
-            frameIndex,
-            objectId,
-            labels: labels,
-            points: normalizedPoints,
-            clearOldPoints: true,
-          },
-        },
-        onCompleted: response => {
-          tracklet.points[frameIndex] = points;
-          tracklet.isInitialized = true;
-          this._updateTrackletMasks(response.addPoints, true);
-          resolve();
-        },
-        onError: error => {
-          Logger.error(error);
-          reject(error);
-        },
-      });
-    });
+
+    return this._queuePointUpdate(
+      this._createPointUpdate({
+        sessionId,
+        frameIndex,
+        objectId,
+        points,
+      }),
+    );
   }
 
   public clearPointsInFrame(
@@ -438,63 +473,33 @@ export class SAM2Model extends Tracker {
     });
   }
 
-  public clearPointsInVideo(): Promise<void> {
+  public async clearPointsInVideo(): Promise<void> {
     const sessionId = this._session.id;
     if (sessionId === null) {
       return Promise.reject('No active session');
     }
 
-    // Mark session needing propagation when point is set
     this._updateStreamingState('none');
-
-    return new Promise(resolve => {
-      commitMutation<SAM2ModelClearPointsInVideoMutation>(this._environment, {
-        mutation: graphql`
-          mutation SAM2ModelClearPointsInVideoMutation(
-            $input: ClearPointsInVideoInput!
-          ) {
-            clearPointsInVideo(input: $input) {
-              success
-            }
-          }
-        `,
-        variables: {
-          input: {
-            sessionId,
-          },
-        },
-        onCompleted: response => {
-          const {success} = response.clearPointsInVideo;
-          if (!success) {
-            this._sendResponse<ClearPointsInVideoResponse>(
-              'clearPointsInVideo',
-              {isSuccessful: false},
-            );
-            return;
-          }
-
-          // Reset points and masks for each tracklet
-          this._clearTracklets();
-
-          // Notify the main thread
-          this._context.goToFrame(this._context.frameIndex);
-          this._updateTracklets();
-          this._sendResponse<ClearPointsInVideoResponse>('clearPointsInVideo', {
-            isSuccessful: true,
-          });
-          resolve();
-        },
-        onError: error => {
-          this._sendResponse<ClearPointsInVideoResponse>('clearPointsInVideo', {
-            isSuccessful: false,
-          });
-          Logger.error(error);
-        },
+    const success = await this._clearBackendPointsInVideo(sessionId);
+    if (!success) {
+      this._sendResponse<ClearPointsInVideoResponse>('clearPointsInVideo', {
+        isSuccessful: false,
       });
+      return;
+    }
+
+    this._clearTracklets();
+    this._context.goToFrame(this._context.frameIndex);
+    this._updateTracklets();
+    this._sendResponse<ClearPointsInVideoResponse>('clearPointsInVideo', {
+      isSuccessful: true,
     });
   }
 
-  public async streamMasks(frameIndex: number): Promise<void> {
+  public async streamMasks(
+    frameIndex: number,
+    frameRange?: FrameRange,
+  ): Promise<void> {
     const sessionId = this._session.id;
     if (sessionId === null) {
       return Promise.reject('No active session');
@@ -511,10 +516,16 @@ export class SAM2Model extends Tracker {
       this.abortController = controller;
 
       this._updateStreamingState('requesting');
+      const normalizedFrameRange = this._normalizeFrameRange(frameRange);
+      const clampedFrameIndex = Math.min(
+        Math.max(frameIndex, normalizedFrameRange.startFrame),
+        normalizedFrameRange.endFrameExclusive - 1,
+      );
       const generator = this._streamMasksForSession(
         controller,
         sessionId,
-        frameIndex,
+        clampedFrameIndex,
+        normalizedFrameRange,
       );
 
       // 3. parse stream response and update masks in session objects
@@ -536,6 +547,12 @@ export class SAM2Model extends Tracker {
         this._updateStreamingState('full');
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        await this._abortRequest().catch(abortError => Logger.error(abortError));
+        this._updateStreamingState('aborted');
+        this._sendResponse<StreamingCompletedResponse>('streamingCompleted');
+        return;
+      }
       Logger.error(error);
       throw error;
     }
@@ -543,8 +560,157 @@ export class SAM2Model extends Tracker {
     this._sendResponse<StreamingCompletedResponse>('streamingCompleted');
   }
 
+  public exportAnnotations(
+    everyNFrames: number = 1,
+    onlyAnnotatedFrames: boolean = true,
+    frameRange?: FrameRange,
+  ): Promise<void> {
+    const sessionId = this._session.id;
+    if (sessionId === null) {
+      return Promise.reject('No active session');
+    }
+
+    const normalizedEveryNFrames = Number.isFinite(everyNFrames)
+      ? Math.max(1, Math.floor(everyNFrames))
+      : 1;
+    const normalizedFrameRange = this._normalizeFrameRange(frameRange);
+    const frames: AnnotationExportPayload['frames'] = [];
+
+    for (
+      let frameIndex = normalizedFrameRange.startFrame;
+      frameIndex < normalizedFrameRange.endFrameExclusive;
+      frameIndex += normalizedEveryNFrames
+    ) {
+      const annotations: AnnotationExportPayload['frames'][number]['annotations'] = [];
+
+      for (const tracklet of Object.values(this._session.tracklets)) {
+        const mask = tracklet.masks[frameIndex];
+        if (mask == null || mask.isEmpty) {
+          continue;
+        }
+
+        const rle = mask.data as RLEObject;
+        const points = (tracklet.points[frameIndex] ?? []).map(
+          point => [point[0], point[1], point[2]] as SegmentationPoint,
+        );
+
+        annotations.push({
+          object_id: tracklet.id,
+          object_name: `Object ${tracklet.id + 1}`,
+          rle: {
+            size: [rle.size[0], rle.size[1]],
+            counts: rle.counts,
+          },
+          points,
+        });
+      }
+
+      if (!onlyAnnotatedFrames || annotations.length > 0) {
+        frames.push({
+          frame_index: frameIndex - normalizedFrameRange.startFrame,
+          annotations,
+        });
+      }
+    }
+
+    this._sendResponse<ExportAnnotationsResponse>('exportAnnotations', {
+      payload: {
+        session_id: sessionId,
+        export_every_n_frames: normalizedEveryNFrames,
+        frames,
+      },
+    });
+    return Promise.resolve();
+  }
+
+  public async trimTrackletsToRange(frameRange: FrameRange): Promise<void> {
+    const sessionId = this._session.id;
+    if (sessionId === null) {
+      return Promise.reject('No active session');
+    }
+
+    if (this._pointUpdateFlushTimer != null) {
+      clearTimeout(this._pointUpdateFlushTimer);
+      this._pointUpdateFlushTimer = null;
+      await this._flushPointUpdates();
+    }
+
+    const normalizedFrameRange = this._normalizeFrameRange(frameRange);
+    const retainedPoints = new Map<number, Array<{frameIndex: number; points: SegmentationPoint[]}>>();
+
+    for (const tracklet of Object.values(this._session.tracklets)) {
+      const retainedForTracklet: Array<{frameIndex: number; points: SegmentationPoint[]}> = [];
+      for (
+        let frameIndex = normalizedFrameRange.startFrame;
+        frameIndex < normalizedFrameRange.endFrameExclusive;
+        frameIndex++
+      ) {
+        const points = tracklet.points[frameIndex];
+        if (points != null && points.length > 0) {
+          retainedForTracklet.push({frameIndex, points});
+        }
+      }
+      retainedPoints.set(tracklet.id, retainedForTracklet);
+    }
+
+    const didClear = await this._clearBackendPointsInVideo(sessionId);
+    if (!didClear) {
+      throw new Error('Failed to clear backend tracking state for trim range');
+    }
+
+    for (const tracklet of Object.values(this._session.tracklets)) {
+      const nextPoints = [] as typeof tracklet.points;
+      const retainedForTracklet = retainedPoints.get(tracklet.id) ?? [];
+      for (const {frameIndex, points} of retainedForTracklet) {
+        nextPoints[frameIndex] = points;
+      }
+      tracklet.points = nextPoints;
+      tracklet.masks = [];
+      tracklet.isInitialized = retainedForTracklet.length > 0;
+    }
+
+    this._context.clearMasks();
+    this._updateTracklets();
+
+    const restoreUpdates: PendingPointUpdate[] = [];
+    for (const [objectId, retainedForTracklet] of retainedPoints) {
+      for (const {frameIndex, points} of retainedForTracklet) {
+        restoreUpdates.push(
+          this._createPointUpdate({
+            sessionId,
+            frameIndex,
+            objectId,
+            points,
+            updateThumbnails: false,
+            shouldGoToFrame: false,
+          }),
+        );
+      }
+    }
+
+    for (const update of restoreUpdates) {
+      await this._queuePointUpdate(update);
+    }
+
+    const hasInitializedTracklets = Object.values(this._session.tracklets).some(
+      tracklet => tracklet.isInitialized,
+    );
+    this._updateStreamingState(hasInitializedTracklets ? 'required' : 'none');
+    this._context.goToFrame(
+      Math.min(
+        Math.max(this._context.frameIndex, normalizedFrameRange.startFrame),
+        normalizedFrameRange.endFrameExclusive - 1,
+      ),
+    );
+    this._updateTracklets();
+    this._sendResponse<TrimTrackletsToRangeResponse>('trimTrackletsToRange', {
+      isSuccessful: true,
+    });
+  }
+
   public abortStreamMasks() {
     this.abortController?.abort();
+    void this._abortRequest().catch(error => Logger.error(error));
     this._sendResponse<StreamingCompletedResponse>('streamingCompleted');
   }
 
@@ -553,6 +719,290 @@ export class SAM2Model extends Tracker {
   }
 
   // PRIVATE
+
+  private _normalizeFrameRange(frameRange?: FrameRange): FrameRange {
+    const totalFrames = Math.max(1, this._context.totalFrames);
+    const startFrame = Math.min(
+      Math.max(0, Math.floor(frameRange?.startFrame ?? 0)),
+      totalFrames - 1,
+    );
+    const endFrameExclusive = Math.max(
+      startFrame + 1,
+      Math.min(
+        totalFrames,
+        Math.floor(frameRange?.endFrameExclusive ?? totalFrames),
+      ),
+    );
+    return {startFrame, endFrameExclusive};
+  }
+
+  private _createPointUpdate({
+    sessionId,
+    frameIndex,
+    objectId,
+    points,
+    updateThumbnails,
+    shouldGoToFrame,
+  }: {
+    sessionId: string;
+    frameIndex: number;
+    objectId: number;
+    points: SegmentationPoint[];
+    updateThumbnails?: boolean;
+    shouldGoToFrame?: boolean;
+  }): PendingPointUpdate {
+    const normalizedPoints = points.map(p => [
+      p[0] / this._context.width,
+      p[1] / this._context.height,
+    ]);
+    const labels = points.map(p => p[2]);
+    return {
+      sessionId,
+      frameIndex,
+      objectId,
+      points,
+      normalizedPoints,
+      labels,
+      updateThumbnails,
+      shouldGoToFrame,
+      resolvers: [],
+    };
+  }
+
+  private _clearBackendPointsInVideo(sessionId: string): Promise<boolean> {
+    return new Promise(resolve => {
+      commitMutation<SAM2ModelClearPointsInVideoMutation>(this._environment, {
+        mutation: graphql`
+          mutation SAM2ModelClearPointsInVideoMutation(
+            $input: ClearPointsInVideoInput!
+          ) {
+            clearPointsInVideo(input: $input) {
+              success
+            }
+          }
+        `,
+        variables: {
+          input: {
+            sessionId,
+          },
+        },
+        onCompleted: response => {
+          resolve(response.clearPointsInVideo.success);
+        },
+        onError: error => {
+          Logger.error(error);
+          resolve(false);
+        },
+      });
+    });
+  }
+
+  private _queuePointUpdate(
+    update: PendingPointUpdate,
+  ): Promise<void> {
+    const key = `${update.sessionId}:${update.frameIndex}:${update.objectId}`;
+
+    return new Promise((resolve, reject) => {
+      const existingUpdate = this._pendingPointUpdates.get(key);
+      const resolver = {resolve, reject};
+      if (existingUpdate != null) {
+        existingUpdate.points = update.points;
+        existingUpdate.normalizedPoints = update.normalizedPoints;
+        existingUpdate.labels = update.labels;
+        existingUpdate.updateThumbnails = update.updateThumbnails;
+        existingUpdate.shouldGoToFrame = update.shouldGoToFrame;
+        existingUpdate.resolvers.push(resolver);
+      } else {
+        this._pendingPointUpdates.set(key, {
+          ...update,
+          resolvers: [resolver],
+        });
+      }
+
+      if (this._pointUpdateFlushTimer == null) {
+        this._pointUpdateFlushTimer = globalThis.setTimeout(() => {
+          this._pointUpdateFlushTimer = null;
+          void this._flushPointUpdates();
+        }, POINT_UPDATE_BATCH_DELAY_MS);
+      }
+    });
+  }
+
+  private async _flushPointUpdates(): Promise<void> {
+    const updates = Array.from(this._pendingPointUpdates.values());
+    this._pendingPointUpdates.clear();
+
+    const updatesByFrame = new Map<string, PendingPointUpdate[]>();
+    for (const update of updates) {
+      const key = `${update.sessionId}:${update.frameIndex}`;
+      const frameUpdates = updatesByFrame.get(key);
+      if (frameUpdates == null) {
+        updatesByFrame.set(key, [update]);
+      } else {
+        frameUpdates.push(update);
+      }
+    }
+
+    for (const frameUpdates of updatesByFrame.values()) {
+      try {
+        if (frameUpdates.length === 1) {
+          await this._commitAddPoints(frameUpdates[0]);
+        } else {
+          await this._commitAddPointsBatch(frameUpdates);
+        }
+      } catch (error) {
+        Logger.error(error);
+      }
+    }
+  }
+
+  private _resolvePointUpdate(update: PendingPointUpdate): void {
+    for (const resolver of update.resolvers) {
+      resolver.resolve();
+    }
+  }
+
+  private _rejectPointUpdate(update: PendingPointUpdate, error: unknown): void {
+    for (const resolver of update.resolvers) {
+      resolver.reject(error);
+    }
+  }
+
+  private _commitAddPoints(update: PendingPointUpdate): Promise<void> {
+    return new Promise((resolve, reject) => {
+      commitMutation<SAM2ModelAddNewPointsMutation>(this._environment, {
+        mutation: graphql`
+          mutation SAM2ModelAddNewPointsMutation($input: AddPointsInput!) {
+            addPoints(input: $input) {
+              frameIndex
+              rleMaskList {
+                objectId
+                rleMask {
+                  counts
+                  size
+                }
+              }
+            }
+          }
+        `,
+        variables: {
+          input: {
+            sessionId: update.sessionId,
+            frameIndex: update.frameIndex,
+            objectId: update.objectId,
+            labels: update.labels,
+            points: update.normalizedPoints,
+            clearOldPoints: true,
+          },
+        },
+        onCompleted: response => {
+          void (async () => {
+            try {
+              const tracklet = this._session.tracklets[update.objectId];
+              if (tracklet != null) {
+                tracklet.points[update.frameIndex] = update.points;
+                tracklet.isInitialized = true;
+              }
+              await this._updateTrackletMasks(
+                response.addPoints,
+                update.updateThumbnails ?? true,
+                update.shouldGoToFrame ?? true,
+              );
+              this._resolvePointUpdate(update);
+              resolve();
+            } catch (error) {
+              this._rejectPointUpdate(update, error);
+              reject(error);
+            }
+          })();
+        },
+        onError: error => {
+          Logger.error(error);
+          this._rejectPointUpdate(update, error);
+          reject(error);
+        },
+      });
+    });
+  }
+
+  private _commitAddPointsBatch(
+    updates: PendingPointUpdate[],
+  ): Promise<void> {
+    const firstUpdate = updates[0];
+
+    return new Promise((resolve, reject) => {
+      commitMutation<SAM2ModelAddNewPointsBatchMutation>(this._environment, {
+        mutation: graphql`
+          mutation SAM2ModelAddNewPointsBatchMutation(
+            $input: AddPointsBatchInput!
+          ) {
+            addPointsBatch(input: $input) {
+              frameIndex
+              rleMaskList {
+                objectId
+                rleMask {
+                  counts
+                  size
+                }
+              }
+            }
+          }
+        `,
+        variables: {
+          input: {
+            sessionId: firstUpdate.sessionId,
+            frameIndex: firstUpdate.frameIndex,
+            clearOldPoints: true,
+            objects: updates.map(update => ({
+              objectId: update.objectId,
+              labels: update.labels,
+              points: update.normalizedPoints,
+            })),
+          },
+        },
+        onCompleted: response => {
+          void (async () => {
+            try {
+              for (const update of updates) {
+                const tracklet = this._session.tracklets[update.objectId];
+                if (tracklet != null) {
+                  tracklet.points[update.frameIndex] = update.points;
+                  tracklet.isInitialized = true;
+                }
+              }
+              await this._updateTrackletMasks(
+                response.addPointsBatch,
+                updates.some(update => update.updateThumbnails ?? true),
+                updates.some(update => update.shouldGoToFrame ?? true),
+              );
+              for (const update of updates) {
+                this._resolvePointUpdate(update);
+              }
+              resolve();
+            } catch (error) {
+              for (const update of updates) {
+                this._rejectPointUpdate(update, error);
+              }
+              reject(error);
+            }
+          })();
+        },
+        onError: error => {
+          Logger.error(error);
+          void (async () => {
+            try {
+              await Promise.all(
+                updates.map(update => this._commitAddPoints(update)),
+              );
+              resolve();
+            } catch (fallbackError) {
+              reject(fallbackError);
+            }
+          })();
+        },
+      });
+    });
+  }
 
   private _cleanup() {
     this._session.id = null;
@@ -588,7 +1038,7 @@ export class SAM2Model extends Tracker {
   }
 
   private async _updateTrackletMasks(
-    data: SAM2ModelAddNewPointsMutation$data['addPoints'],
+    data: AddPointsResult,
     updateThumbnails: boolean,
     shouldGoToFrame: boolean = true,
   ) {
@@ -718,12 +1168,15 @@ export class SAM2Model extends Tracker {
     abortController: AbortController,
     sessionId: string,
     startFrameIndex: undefined | number = 0,
+    frameRange?: FrameRange,
   ): AsyncGenerator<StreamMasksResult | StreamMasksAbortResult, undefined> {
     const url = `${this._endpoint}/propagate_in_video`;
 
     const requestBody = {
       session_id: sessionId,
       start_frame_index: startFrameIndex,
+      trim_start_frame: frameRange?.startFrame,
+      trim_end_frame_exclusive: frameRange?.endFrameExclusive,
     };
 
     const headers: {[name: string]: string} = Object.assign({
@@ -734,7 +1187,15 @@ export class SAM2Model extends Tracker {
       method: 'POST',
       body: JSON.stringify(requestBody),
       headers,
+      signal: abortController.signal,
     });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `propagate_in_video failed with ${response.status}: ${errorText}`,
+      );
+    }
 
     const contentType = response.headers.get('Content-Type');
     if (

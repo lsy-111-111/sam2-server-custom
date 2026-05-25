@@ -23,7 +23,6 @@ import {
   MP4Sample,
   MP4VideoTrack,
 } from 'mp4box';
-import {isAndroid, isChrome, isEdge, isWindows} from 'react-device-detect';
 
 export type ImageFrame = {
   bitmap: VideoFrame;
@@ -39,6 +38,23 @@ export type DecodedVideo = {
   fps: number;
 };
 
+function needsDecodeCloneWorkaround(): boolean {
+  const ua = self.navigator?.userAgent ?? '';
+  const platform = self.navigator?.platform ?? '';
+
+  const isAndroid = /Android/i.test(ua);
+  const isWindows = /Win/i.test(platform) || /Windows/i.test(ua);
+  const isEdge = /\bEdg\//i.test(ua);
+  const isChrome =
+    /\bChrome\//i.test(ua) && !/\bEdg\//i.test(ua) && !/\bOPR\//i.test(ua);
+
+  return (
+    (isAndroid && isChrome) ||
+    (isWindows && isChrome) ||
+    (isWindows && isEdge)
+  );
+}
+
 function decodeInternal(
   identifier: string,
   onReady: (mp4File: MP4File) => Promise<void>,
@@ -47,6 +63,7 @@ function decodeInternal(
   return new Promise((resolve, reject) => {
     const imageFrames: ImageFrame[] = [];
     const globalSamples: MP4Sample[] = [];
+    const needsCloneWorkaround = needsDecodeCloneWorkaround();
 
     let decoder: VideoDecoder;
 
@@ -79,7 +96,26 @@ function decodeInternal(
       const timescale = track.timescale;
       const edits = track.edits;
 
-      let frame_n = 0;
+      let sampleIndex = 0;
+      const maybeResolve = (saveTrack: MP4VideoTrack) => {
+        if (saveTrack.nb_samples !== sampleIndex) {
+          return;
+        }
+
+        // Sort frames in order of timestamp. This is needed because Safari
+        // can return decoded frames out of order.
+        imageFrames.sort((a, b) => (a.timestamp > b.timestamp ? 1 : -1));
+        resolve({
+          width: saveTrack.track_width,
+          height: saveTrack.track_height,
+          frames: imageFrames,
+          // Use the actual rendered frame count after edit-list filtering.
+          numFrames: imageFrames.length,
+          fps:
+            (saveTrack.nb_samples / saveTrack.duration) * saveTrack.timescale,
+        });
+      };
+
       decoder = new VideoDecoder({
         // Be careful with any await in this function. The VideoDecoder will
         // not await output and continue calling it with decoded frames.
@@ -102,6 +138,8 @@ function decodeInternal(
             );
             if (cts < edits[0].media_time) {
               inputFrame.close();
+              sampleIndex++;
+              maybeResolve(saveTrack);
               return;
             }
           }
@@ -113,47 +151,35 @@ function decodeInternal(
           // video will be black. Note, the default VideoFrame.clone doesn't work
           // and it is using a frame cloning found here:
           // https://webcodecs-blogpost-demo.glitch.me/
-          if (
-            (isAndroid && isChrome) ||
-            (isWindows && isChrome) ||
-            (isWindows && isEdge)
-          ) {
+          if (needsCloneWorkaround) {
             const clonedFrame = await cloneFrame(inputFrame);
             inputFrame.close();
             inputFrame = clonedFrame;
           }
 
-          const sample = globalSamples[frame_n];
-          if (sample != null) {
-            const duration = (sample.duration * 1_000_000) / sample.timescale;
-            imageFrames.push({
-              bitmap: inputFrame,
-              timestamp: inputFrame.timestamp,
-              duration,
-            });
-            // Sort frames in order of timestamp. This is needed because Safari
-            // can return decoded frames out of order.
-            imageFrames.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-            // Update progress on first frame and then every 40th frame
-            if (onProgress != null && frame_n % 100 === 0) {
-              onProgress({
-                width: saveTrack.track_width,
-                height: saveTrack.track_height,
-                frames: imageFrames,
-                numFrames: saveTrack.nb_samples,
-                fps:
-                  (saveTrack.nb_samples / saveTrack.duration) *
-                  saveTrack.timescale,
-              });
-            }
+          const sample = globalSamples[sampleIndex];
+          if (sample == null) {
+            inputFrame.close();
+            sampleIndex++;
+            maybeResolve(saveTrack);
+            return;
           }
-          frame_n++;
 
-          if (saveTrack.nb_samples === frame_n) {
-            // Sort frames in order of timestamp. This is needed because Safari
-            // can return decoded frames out of order.
-            imageFrames.sort((a, b) => (a.timestamp > b.timestamp ? 1 : -1));
-            resolve({
+          const duration = (sample.duration * 1_000_000) / sample.timescale;
+          imageFrames.push({
+            bitmap: inputFrame,
+            timestamp: inputFrame.timestamp,
+            duration,
+          });
+          // Sort frames in order of timestamp. This is needed because Safari
+          // can return decoded frames out of order.
+          imageFrames.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+          // Update progress on first frame and then every 100th rendered frame.
+          if (
+            onProgress != null &&
+            (imageFrames.length === 1 || imageFrames.length % 100 === 0)
+          ) {
+            onProgress({
               width: saveTrack.track_width,
               height: saveTrack.track_height,
               frames: imageFrames,
@@ -163,6 +189,9 @@ function decodeInternal(
                 saveTrack.timescale,
             });
           }
+
+          sampleIndex++;
+          maybeResolve(saveTrack);
         },
         error(error) {
           reject(error);

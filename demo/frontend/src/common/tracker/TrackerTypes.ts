@@ -13,11 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import {SegmentationPoint} from '@/common/tracker/Tracker';
+import {FrameRange, SegmentationPoint} from '@/common/tracker/Tracker';
 import {TrackerOptions, Trackers} from '@/common/tracker/Trackers';
 import {
   AddPointsEvent,
   ClearPointsInVideoEvent,
+  CloseSessionEvent,
+  ExportAnnotationsEvent,
   SessionStartFailedEvent,
   SessionStartedEvent,
   StreamingCompletedEvent,
@@ -80,11 +82,24 @@ export type StreamMasksRequest = Request<
   'streamMasks',
   {
     frameIndex: number;
+    frameRange?: FrameRange;
+  }
+>;
+export type ExportAnnotationsRequest = Request<
+  'exportAnnotations',
+  {
+    everyNFrames?: number;
+    onlyAnnotatedFrames?: boolean;
+    frameRange?: FrameRange;
   }
 >;
 export type AbortStreamMasksRequest = Request<'abortStreamMasks', unknown>;
-
-export type LogAnnotationsRequest = Request<'logAnnotations', unknown>;
+export type TrimTrackletsToRangeRequest = Request<
+  'trimTrackletsToRange',
+  {
+    frameRange: FrameRange;
+  }
+>;
 
 export type TrackerRequest =
   | InitializeTrackerRequest
@@ -96,8 +111,9 @@ export type TrackerRequest =
   | ClearPointsInFrameRequest
   | ClearPointsInVideoRequest
   | StreamMasksRequest
+  | ExportAnnotationsRequest
   | AbortStreamMasksRequest
-  | LogAnnotationsRequest;
+  | TrimTrackletsToRangeRequest;
 
 export type TrackerRequestMessageEvent = MessageEvent<TrackerRequest>;
 
@@ -112,6 +128,8 @@ export type SessionStartFailedResponse = Request<
   'sessionStartFailed',
   SessionStartFailedEvent
 >;
+
+export type CloseSessionResponse = Request<'closeSession', CloseSessionEvent>;
 
 export type TrackletCreatedResponse = Request<
   'trackletCreated',
@@ -150,9 +168,20 @@ export type StreamingStateUpdateResponse = Request<
   StreamingStateUpdateEvent
 >;
 
+export type ExportAnnotationsResponse = Request<
+  'exportAnnotations',
+  ExportAnnotationsEvent
+>;
+
+export type TrimTrackletsToRangeResponse = Request<
+  'trimTrackletsToRange',
+  {isSuccessful: boolean}
+>;
+
 export type TrackerResponse =
   | SessionStartedResponse
   | SessionStartFailedResponse
+  | CloseSessionResponse
   | TrackletCreatedResponse
   | TrackletsUpdatedResponse
   | TrackletDeletedResponse
@@ -160,6 +189,8 @@ export type TrackerResponse =
   | ClearPointsInVideoResponse
   | StreamingStartedResponse
   | StreamingCompletedResponse
-  | StreamingStateUpdateResponse;
+  | StreamingStateUpdateResponse
+  | ExportAnnotationsResponse
+  | TrimTrackletsToRangeResponse;
 
 export type TrackerResponseMessageEvent = MessageEvent<TrackerResponse>;

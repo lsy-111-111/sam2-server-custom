@@ -372,3 +372,55 @@ them to a <div> instead of a <progress> element  */
   content: '';
   animation: ellipsisAnimation 1.5s infinite;
 }
+
+.clip-range-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: none;
+  background: transparent;
+}
+
+.clip-range-slider:focus {
+  outline: none;
+}
+
+.clip-range-slider::-webkit-slider-runnable-track {
+  height: 0.5rem;
+  background: transparent;
+}
+
+.clip-range-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: auto;
+  width: 1rem;
+  height: 1rem;
+  margin-top: -0.25rem;
+  border-radius: 9999px;
+  border: 2px solid #111827;
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(89, 95, 239, 0.35);
+  cursor: pointer;
+}
+
+.clip-range-slider::-moz-range-track {
+  height: 0.5rem;
+  background: transparent;
+}
+
+.clip-range-slider::-moz-range-thumb {
+  pointer-events: auto;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 9999px;
+  border: 2px solid #111827;
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(89, 95, 239, 0.35);
+  cursor: pointer;
+}
+
+.clip-range-slider:disabled::-webkit-slider-thumb,
+.clip-range-slider:disabled::-moz-range-thumb {
+  cursor: not-allowed;
+  opacity: 0.6;
+}

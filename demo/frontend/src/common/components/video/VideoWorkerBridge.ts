@@ -16,7 +16,9 @@
 import {EffectIndex, Effects} from '@/common/components/video/effects/Effects';
 import {registerSerializableConstructors} from '@/common/error/ErrorSerializationUtils';
 import {
+  AnnotationExportPayload,
   BaseTracklet,
+  FrameRange,
   SegmentationPoint,
   StreamingState,
 } from '@/common/tracker/Tracker';
@@ -29,8 +31,8 @@ import {
   CloseSessionRequest,
   CreateTrackletRequest,
   DeleteTrackletRequest,
+  ExportAnnotationsRequest,
   InitializeTrackerRequest,
-  LogAnnotationsRequest,
   SessionStartFailedResponse,
   SessionStartedResponse,
   StartSessionRequest,
@@ -40,6 +42,8 @@ import {
   TrackerResponseMessageEvent,
   TrackletCreatedResponse,
   TrackletDeletedResponse,
+  TrimTrackletsToRangeRequest,
+  TrimTrackletsToRangeResponse,
   UpdatePointsRequest,
 } from '@/common/tracker/TrackerTypes';
 import {TrackerOptions, Trackers} from '@/common/tracker/Trackers';
@@ -106,7 +110,9 @@ export interface SessionStartedEvent {
   sessionId: string;
 }
 
-export interface SessionStartFailedEvent {}
+export interface SessionStartFailedEvent {
+  error?: ErrorObject;
+}
 
 export interface TrackletCreatedEvent {
   // Do not send masks between workers and main thread because they are huge,
@@ -132,6 +138,18 @@ export interface ClearPointsInVideoEvent {
   isSuccessful: boolean;
 }
 
+export interface CloseSessionEvent {
+  isSuccessful: boolean;
+}
+
+export interface ExportAnnotationsEvent {
+  payload: AnnotationExportPayload;
+}
+
+export interface TrimTrackletsToRangeEvent {
+  isSuccessful: boolean;
+}
+
 export interface StreamingStartedEvent {}
 
 export interface StreamingCompletedEvent {}
@@ -140,12 +158,16 @@ export interface StreamingStateUpdateEvent {
   state: StreamingState;
 }
 
+export interface WorkerErrorEvent {
+  error: ErrorObject;
+}
+
 export interface RenderingErrorEvent {
   error: ErrorObject;
 }
 
 export interface VideoWorkerEventMap {
-  error: ErrorEvent;
+  error: WorkerErrorEvent;
   decode: DecodeEvent;
   encodingStateUpdate: EncodingStateUpdateEvent;
   encodingCompleted: EncodingCompletedEvent;
@@ -155,11 +177,14 @@ export interface VideoWorkerEventMap {
   frameUpdate: FrameUpdateEvent;
   sessionStarted: SessionStartedEvent;
   sessionStartFailed: SessionStartFailedEvent;
+  closeSession: CloseSessionEvent;
   trackletCreated: TrackletCreatedEvent;
   trackletsUpdated: TrackletsEvent;
   trackletDeleted: TrackletDeletedEvent;
   addPoints: AddPointsEvent;
   clearPointsInVideo: ClearPointsInVideoEvent;
+  exportAnnotations: ExportAnnotationsEvent;
+  trimTrackletsToRange: TrimTrackletsToRangeEvent;
   streamingStarted: StreamingStartedEvent;
   streamingCompleted: StreamingCompletedEvent;
   streamingStateUpdate: StreamingStateUpdateEvent;
@@ -171,9 +196,11 @@ export interface VideoWorkerEventMap {
 
 type Metadata = {
   totalFrames: number;
+  decodedFrames: number;
   fps: number;
   width: number;
   height: number;
+  done: boolean;
 };
 
 export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap> {
@@ -204,6 +231,30 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
     return this.metadata?.totalFrames ?? 0;
   }
 
+  public get decodedFrames() {
+    return this.metadata?.decodedFrames ?? 0;
+  }
+
+  public get isDecodeComplete() {
+    return this.metadata?.done ?? false;
+  }
+
+  private get seekableFrameCount() {
+    if (this.metadata == null) {
+      return 0;
+    }
+    return this.metadata.done
+      ? this.metadata.totalFrames
+      : this.metadata.decodedFrames;
+  }
+
+  private clampFrameIndex(index: number): number | null {
+    if (this.seekableFrameCount < 1) {
+      return null;
+    }
+    return Math.min(Math.max(0, index), this.seekableFrameCount - 1);
+  }
+
   public get fps() {
     return this.metadata?.fps ?? 0;
   }
@@ -227,13 +278,25 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
             event.data.error = deserializeError(event.data.error);
             break;
           case 'decode':
-            this.metadata = event.data;
+            this.metadata = {
+              totalFrames: event.data.totalFrames,
+              decodedFrames: event.data.numFrames,
+              fps: event.data.fps,
+              width: event.data.width,
+              height: event.data.height,
+              done: event.data.done,
+            };
             break;
           case 'frameUpdate':
             this.frameIndex = event.data.index;
             break;
           case 'sessionStarted':
             this._sessionId = event.data.sessionId;
+            break;
+          case 'closeSession':
+            if (event.data.isSuccessful) {
+              this._sessionId = null;
+            }
             break;
         }
         this.trigger(event.data.action, event.data);
@@ -242,6 +305,12 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
   }
 
   public setCanvas(canvas: HTMLCanvasElement): void {
+    if (typeof canvas.transferControlToOffscreen !== 'function') {
+      throw new Error(
+        'HTMLCanvasElement.transferControlToOffscreen is unavailable in this browser.',
+      );
+    }
+
     const offscreenCanvas = canvas.transferControlToOffscreen();
     this.sendRequest<SetCanvasRequest>(
       'setCanvas',
@@ -276,8 +345,12 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
   }
 
   public goToFrame(index: number): void {
+    const clampedIndex = this.clampFrameIndex(index);
+    if (clampedIndex == null) {
+      return;
+    }
     this.sendRequest<FrameUpdateRequest>('frameUpdate', {
-      index,
+      index: clampedIndex,
     });
   }
 
@@ -287,12 +360,15 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
   }
 
   public nextFrame(): void {
-    const index = Math.min(this.frameIndex + 1, this.numberOfFrames - 1);
-    this.goToFrame(index);
+    const maxFrameIndex = this.clampFrameIndex(this.frameIndex + 1);
+    if (maxFrameIndex == null) {
+      return;
+    }
+    this.goToFrame(maxFrameIndex);
   }
 
   public set frame(index: number) {
-    this.sendRequest<FrameUpdateRequest>('frameUpdate', {index});
+    this.goToFrame(index);
   }
 
   createFilmstrip(width: number, height: number): Promise<ImageBitmap> {
@@ -323,8 +399,8 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
     });
   }
 
-  encode(): void {
-    this.sendRequest<EncodeVideoRequest>('encode');
+  encode(frameRange?: FrameRange): void {
+    this.sendRequest<EncodeVideoRequest>('encode', {frameRange});
   }
 
   initializeTracker(name: keyof Trackers, options: TrackerOptions): void {
@@ -358,12 +434,63 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
     });
   }
 
-  closeSession(): void {
-    this.sendRequest<CloseSessionRequest>('closeSession');
+  closeSession(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        this.removeEventListener('closeSession', handleResponse);
+        this.removeEventListener('error', handleError);
+      };
+
+      const handleResponse = (event: CloseSessionEvent) => {
+        cleanup();
+        if (event.isSuccessful) {
+          this._sessionId = null;
+          resolve();
+          return;
+        }
+        reject(new Error('Failed to close session'));
+      };
+
+      const handleError = (event: WorkerErrorEvent) => {
+        cleanup();
+        reject(new Error(event.error.message ?? 'Failed to close session'));
+      };
+
+      this.addEventListener('closeSession', handleResponse);
+      this.addEventListener('error', handleError);
+      this.sendRequest<CloseSessionRequest>('closeSession');
+    });
   }
 
-  logAnnotations(): void {
-    this.sendRequest<LogAnnotationsRequest>('logAnnotations');
+  exportAnnotations(
+    everyNFrames: number = 1,
+    onlyAnnotatedFrames: boolean = true,
+    frameRange?: FrameRange,
+  ): Promise<AnnotationExportPayload | null> {
+    return new Promise(resolve => {
+      const cleanup = () => {
+        this.removeEventListener('exportAnnotations', handleResponse);
+        this.removeEventListener('error', handleError);
+      };
+
+      const handleResponse = (event: ExportAnnotationsEvent) => {
+        cleanup();
+        resolve(event.payload);
+      };
+
+      const handleError = () => {
+        cleanup();
+        resolve(null);
+      };
+
+      this.addEventListener('exportAnnotations', handleResponse);
+      this.addEventListener('error', handleError);
+      this.sendRequest<ExportAnnotationsRequest>('exportAnnotations', {
+        everyNFrames,
+        onlyAnnotatedFrames,
+        frameRange,
+      });
+    });
   }
 
   createTracklet(): Promise<BaseTracklet> {
@@ -442,9 +569,45 @@ export default class VideoWorkerBridge extends EventEmitter<VideoWorkerEventMap>
     });
   }
 
-  streamMasks(): void {
+  streamMasks(frameRange?: FrameRange): void {
     this.sendRequest<StreamMasksRequest>('streamMasks', {
       frameIndex: this.frame,
+      frameRange,
+    });
+  }
+
+
+  trimTrackletsToRange(frameRange: FrameRange): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        this.worker.removeEventListener('message', handleResponse);
+        this.removeEventListener('error', handleError);
+      };
+
+      const handleResponse = (
+        event: MessageEvent<TrimTrackletsToRangeResponse>,
+      ) => {
+        if (event.data.action !== 'trimTrackletsToRange') {
+          return;
+        }
+        cleanup();
+        if (event.data.isSuccessful) {
+          resolve();
+        } else {
+          reject(new Error('Failed to trim tracklets'));
+        }
+      };
+
+      const handleError = (event: WorkerErrorEvent) => {
+        cleanup();
+        reject(new Error(event.error.message ?? 'Failed to trim tracklets'));
+      };
+
+      this.worker.addEventListener('message', handleResponse);
+      this.addEventListener('error', handleError);
+      this.sendRequest<TrimTrackletsToRangeRequest>('trimTrackletsToRange', {
+        frameRange,
+      });
     });
   }
 

@@ -15,6 +15,8 @@ from app_conf import GALLERY_PATH, POSTERS_PATH, POSTERS_PREFIX
 from data.data_types import Video
 from tqdm import tqdm
 
+FFMPEG_POSTER_TIMEOUT_SEC = int(os.getenv("FFMPEG_POSTER_TIMEOUT_SEC", "30"))
+
 
 def preload_data() -> Dict[str, Video]:
     """
@@ -59,7 +61,7 @@ def get_video(
         # Extract the first frame from video
         poster_output_path = os.path.join(POSTERS_PATH, poster_filename)
         ffmpeg = shutil.which("ffmpeg")
-        subprocess.call(
+        subprocess.run(
             [
                 ffmpeg,
                 "-y",
@@ -77,6 +79,7 @@ def get_video(
             ],
             stdout=None if verbose else subprocess.DEVNULL,
             stderr=None if verbose else subprocess.DEVNULL,
+            timeout=FFMPEG_POSTER_TIMEOUT_SEC,
         )
 
         # Extract video width and height from poster. This is important to optimize

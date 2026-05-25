@@ -13,6 +13,14 @@ from dataclasses_json import dataclass_json
 from strawberry import relay
 
 
+def resolve_api_url(path: Optional[str]) -> str:
+    if path is None:
+        return ""
+
+    base_url = API_URL.rstrip("/")
+    return f"{base_url}/{path}" if base_url else f"/{path}"
+
+
 @strawberry.type
 class Video(relay.Node):
     """Core type for video."""
@@ -25,11 +33,11 @@ class Video(relay.Node):
 
     @strawberry.field
     def url(self) -> str:
-        return f"{API_URL}/{self.path}"
+        return resolve_api_url(self.path)
 
     @strawberry.field
     def poster_url(self) -> str:
-        return f"{API_URL}/{self.poster_path}"
+        return resolve_api_url(self.poster_path)
 
     @classmethod
     def resolve_nodes(
@@ -105,6 +113,21 @@ class AddPointsInput:
     object_id: int
     labels: List[int]
     points: List[List[float]]
+
+
+@strawberry.input
+class AddPointsBatchObjectInput:
+    object_id: int
+    labels: List[int]
+    points: List[List[float]]
+
+
+@strawberry.input
+class AddPointsBatchInput:
+    session_id: str
+    frame_index: int
+    clear_old_points: bool
+    objects: List[AddPointsBatchObjectInput]
 
 
 @strawberry.input

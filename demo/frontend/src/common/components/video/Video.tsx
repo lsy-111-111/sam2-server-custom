@@ -13,7 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import {BaseTracklet, SegmentationPoint} from '@/common/tracker/Tracker';
+import {
+  AnnotationExportPayload,
+  BaseTracklet,
+  FrameRange,
+  SegmentationPoint,
+} from '@/common/tracker/Tracker';
 import {TrackerOptions, Trackers} from '@/common/tracker/Trackers';
 import {PauseFilled, PlayFilledAlt} from '@carbon/icons-react';
 import stylex, {StyleXStyles} from '@stylexjs/stylex';
@@ -36,8 +41,10 @@ import {useAtom} from 'jotai';
 import useResizeObserver from 'use-resize-observer';
 import VideoLoadingOverlay from './VideoLoadingOverlay';
 import {
+  DecodeEvent,
   StreamingStateUpdateEvent,
   VideoWorkerEventMap,
+  WorkerErrorEvent,
 } from './VideoWorkerBridge';
 import {EffectOptions} from './effects/Effect';
 import useVideoWorker from './useVideoWorker';
@@ -88,9 +95,12 @@ export type VideoRef = {
   getCanvas(): HTMLCanvasElement | null;
   get width(): number;
   get height(): number;
+  get fps(): number;
   get frame(): number;
   set frame(index: number);
   get numberOfFrames(): number;
+  get decodedFrameCount(): number;
+  get isDecodeComplete(): boolean;
   play(): void;
   pause(): void;
   stop(): void;
@@ -101,8 +111,8 @@ export type VideoRef = {
     index: EffectIndex,
     options?: EffectOptions,
   ): void;
-  encode(): void;
-  streamMasks(): void;
+  encode(frameRange?: FrameRange): void;
+  streamMasks(frameRange?: FrameRange): void;
   abortStreamMasks(): Promise<void>;
   addEventListener<K extends keyof VideoWorkerEventMap>(
     type: K,
@@ -116,8 +126,13 @@ export type VideoRef = {
   // Tracker
   initializeTracker(name: keyof Trackers, options?: TrackerOptions): void;
   startSession(videoUrl: string): Promise<string | null>;
-  closeSession(): void;
-  logAnnotations(): void;
+  closeSession(): Promise<void>;
+  exportAnnotations(
+    everyNFrames?: number,
+    onlyAnnotatedFrames?: boolean,
+    frameRange?: FrameRange,
+  ): Promise<AnnotationExportPayload | null>;
+  trimTrackletsToRange(frameRange: FrameRange): Promise<void>;
   createTracklet(): Promise<BaseTracklet>;
   deleteTracklet(trackletId: number): Promise<void>;
   updatePoints(trackletId: number, points: SegmentationPoint[]): void;
@@ -170,6 +185,9 @@ export default forwardRef<VideoRef, Props>(function Video(
       get height() {
         return bridge.width;
       },
+      get fps() {
+        return bridge.fps;
+      },
       get frame() {
         return bridge.frame;
       },
@@ -178,6 +196,12 @@ export default forwardRef<VideoRef, Props>(function Video(
       },
       get numberOfFrames() {
         return bridge.numberOfFrames;
+      },
+      get decodedFrameCount() {
+        return bridge.decodedFrames;
+      },
+      get isDecodeComplete() {
+        return bridge.isDecodeComplete;
       },
       play(): void {
         bridge.play();
@@ -201,11 +225,11 @@ export default forwardRef<VideoRef, Props>(function Video(
       ): void {
         bridge.setEffect(name, index, options);
       },
-      encode(): void {
-        bridge.encode();
+      encode(frameRange?: FrameRange): void {
+        bridge.encode(frameRange);
       },
-      streamMasks(): void {
-        bridge.streamMasks();
+      streamMasks(frameRange?: FrameRange): void {
+        bridge.streamMasks(frameRange);
       },
       abortStreamMasks(): Promise<void> {
         return bridge.abortStreamMasks();
@@ -232,11 +256,22 @@ export default forwardRef<VideoRef, Props>(function Video(
       startSession(videoUrl: string): Promise<string | null> {
         return bridge.startSession(videoUrl);
       },
-      closeSession(): void {
-        bridge.closeSession();
+      closeSession(): Promise<void> {
+        return bridge.closeSession();
       },
-      logAnnotations(): void {
-        bridge.logAnnotations();
+      exportAnnotations(
+        everyNFrames?: number,
+        onlyAnnotatedFrames?: boolean,
+        frameRange?: FrameRange,
+      ): Promise<AnnotationExportPayload | null> {
+        return bridge.exportAnnotations(
+          everyNFrames,
+          onlyAnnotatedFrames,
+          frameRange,
+        );
+      },
+      trimTrackletsToRange(frameRange: FrameRange): Promise<void> {
+        return bridge.trimTrackletsToRange(frameRange);
       },
       createTracklet(): Promise<BaseTracklet> {
         return bridge.createTracklet();
@@ -278,7 +313,7 @@ export default forwardRef<VideoRef, Props>(function Video(
       }
     }
 
-    function onError(event: ErrorEvent) {
+    function onError(event: WorkerErrorEvent) {
       const error = event.error;
       Logger.error(error);
       reportError(error);
@@ -304,8 +339,10 @@ export default forwardRef<VideoRef, Props>(function Video(
       setIsVideoLoading(true);
     }
 
-    function onDecodeStart() {
-      setIsVideoLoading(false);
+    function onDecodeStart(event: DecodeEvent) {
+      if (event.numFrames > 0) {
+        setIsVideoLoading(false);
+      }
     }
 
     window.addEventListener('focus', onFocus);

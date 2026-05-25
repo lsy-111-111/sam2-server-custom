@@ -23,23 +23,28 @@ import VideoFilmstripWithPlayback from '@/common/components/video/VideoFilmstrip
 import {
   FrameUpdateEvent,
   RenderingErrorEvent,
+  SessionStartFailedEvent,
   SessionStartedEvent,
   TrackletsEvent,
+  WorkerErrorEvent,
 } from '@/common/components/video/VideoWorkerBridge';
 import VideoEditor from '@/common/components/video/editor/VideoEditor';
 import useResetDemoEditor from '@/common/components/video/editor/useResetEditor';
 import useVideo from '@/common/components/video/editor/useVideo';
 import InteractionLayer from '@/common/components/video/layers/InteractionLayer';
 import {PointsLayer} from '@/common/components/video/layers/PointsLayer';
+import {getErrorSummary, getRenderErrorSummary} from '@/common/error/ErrorUtils';
 import LoadingStateScreen from '@/common/loading/LoadingStateScreen';
 import UploadLoadingScreen from '@/common/loading/UploadLoadingScreen';
 import useScreenSize from '@/common/screen/useScreenSize';
 import {SegmentationPoint} from '@/common/tracker/Tracker';
 import {
   activeTrackletObjectIdAtom,
+  annotationExportSnapshotAtom,
   frameIndexAtom,
   isAddObjectEnabledAtom,
   isPlayingAtom,
+  isPreviewVideo,
   isVideoLoadingAtom,
   pointsAtom,
   sessionAtom,
@@ -95,9 +100,15 @@ type Props = {
 export default function DemoVideoEditor({video: inputVideo}: Props) {
   const {settings} = useSettingsContext();
   const video = useVideo();
+  const interactiveVideoPath =
+    inputVideo.path != null && !isPreviewVideo(inputVideo)
+      ? inputVideo.path
+      : null;
 
   const [isSessionStartFailed, setIsSessionStartFailed] =
     useState<boolean>(false);
+  const [sessionStartError, setSessionStartError] =
+    useState<ErrorObject | null>(null);
 
   const [session, setSession] = useAtom(sessionAtom);
 
@@ -105,6 +116,7 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
     activeTrackletObjectIdAtom,
   );
   const setTrackletObjects = useSetAtom(trackletObjectsAtom);
+  const setAnnotationExportSnapshot = useSetAtom(annotationExportSnapshotAtom);
   const setFrameIndex = useSetAtom(frameIndexAtom);
   const points = useAtomValue(pointsAtom);
   const isAddObjectEnabled = useAtomValue(isAddObjectEnabledAtom);
@@ -114,6 +126,9 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
   const uploadingState = useAtomValue(uploadingStateAtom);
 
   const [renderingError, setRenderingError] = useState<ErrorObject | null>(
+    null,
+  );
+  const [videoRuntimeError, setVideoRuntimeError] = useState<ErrorObject | null>(
     null,
   );
 
@@ -127,9 +142,17 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
   const {resetEditor, resetSession} = useResetDemoEditor();
   useEffect(() => {
     resetEditor();
+    setIsSessionStartFailed(false);
+    setSessionStartError(null);
+    setRenderingError(null);
+    setVideoRuntimeError(null);
   }, [inputVideo, resetEditor]);
 
   useEffect(() => {
+    if (interactiveVideoPath == null) {
+      return;
+    }
+
     function onFrameUpdate(event: FrameUpdateEvent) {
       setFrameIndex(event.index);
     }
@@ -139,13 +162,17 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
     video?.addEventListener('frameUpdate', onFrameUpdate);
 
     function onSessionStarted(event: SessionStartedEvent) {
+      setIsSessionStartFailed(false);
+      setSessionStartError(null);
+      setAnnotationExportSnapshot(null);
       setSession({id: event.sessionId, ranPropagation: false});
     }
 
     video?.addEventListener('sessionStarted', onSessionStarted);
 
-    function onSessionStartFailed() {
+    function onSessionStartFailed(event: SessionStartFailedEvent) {
       setIsSessionStartFailed(true);
+      setSessionStartError(event.error ?? null);
     }
 
     video?.addEventListener('sessionStartFailed', onSessionStartFailed);
@@ -161,34 +188,44 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
     video?.addEventListener('trackletsUpdated', onTrackletsUpdated);
 
     function onRenderingError(event: RenderingErrorEvent) {
+      setVideoRuntimeError(null);
       setRenderingError(event.error);
     }
 
     video?.addEventListener('renderingError', onRenderingError);
 
+    function onWorkerError(event: WorkerErrorEvent) {
+      setVideoRuntimeError(event.error);
+    }
+
+    video?.addEventListener('error', onWorkerError);
+
     video?.initializeTracker('SAM 2', {
       inferenceEndpoint: settings.inferenceAPIEndpoint,
     });
 
-    video?.startSession(inputVideo.path);
+    setAnnotationExportSnapshot(null);
+    video?.startSession(interactiveVideoPath);
 
     return () => {
-      video?.closeSession();
+      const closeSessionPromise = video?.closeSession();
+      void closeSessionPromise?.catch(() => {});
       video?.removeEventListener('frameUpdate', onFrameUpdate);
       video?.removeEventListener('sessionStarted', onSessionStarted);
       video?.removeEventListener('sessionStartFailed', onSessionStartFailed);
       video?.removeEventListener('trackletsUpdated', onTrackletsUpdated);
       video?.removeEventListener('renderingError', onRenderingError);
+      video?.removeEventListener('error', onWorkerError);
     };
   }, [
+    interactiveVideoPath,
+    resetSession,
     setFrameIndex,
     setSession,
     setTrackletObjects,
-    resetSession,
-    inputVideo,
-    video,
     settings.inferenceAPIEndpoint,
-    settings.videoAPIEndpoint,
+    setAnnotationExportSnapshot,
+    video,
   ]);
 
   async function handleOptimisticPointUpdate(newPoints: SegmentationPoint[]) {
@@ -240,6 +277,13 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
   // to get absolute point clicks within the video's coordinate system.
   // The PointsLayer handles rendering of input points and allows removing
   // individual points by clicking on them.
+  const sessionStartFailureReason =
+    sessionStartError != null
+      ? getErrorSummary(sessionStartError)
+      : 'The backend rejected the session start request.';
+  const renderingFailureReason = getRenderErrorSummary(renderingError);
+  const videoRuntimeFailureReason = getErrorSummary(videoRuntimeError);
+
   const layers = (
     <>
       {tabIndex === OBJECT_TOOLBAR_INDEX && (
@@ -259,9 +303,12 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
     </>
   );
 
+  const showUploadOverlay =
+    uploadingState !== 'default' && interactiveVideoPath != null;
+
   return (
     <>
-      {(isVideoLoading || session === null) && !isSessionStartFailed && (
+      {isVideoLoading && !isSessionStartFailed && (
         <div {...stylex.props(styles.loadingScreenWrapper)}>
           <LoadingStateScreen
             title="Loading demo..."
@@ -272,33 +319,63 @@ export default function DemoVideoEditor({video: inputVideo}: Props) {
       {isSessionStartFailed && (
         <div {...stylex.props(styles.loadingScreenWrapper)}>
           <LoadingStateScreen
-            title="Did we just break the internet?"
-            description={
-              <>Uh oh, it looks like there was an issue starting a session.</>
-            }
-            linkProps={{to: '..', label: 'Back to homepage'}}
-          />
+            title="Could not start the SAM 2 session."
+            description="The page loaded, but the backend could not open a tracking session for this video."
+            linkProps={{to: '..', label: 'Back to homepage'}}>
+            <div className="rounded-lg border border-black/10 bg-black/5 px-4 py-3 text-left text-sm text-[#4B5563]">
+              <div>Reason: {sessionStartFailureReason}</div>
+              <div className="mt-2 break-all">
+                Inference API Endpoint:{' '}
+                {settings.inferenceAPIEndpoint ||
+                  '(same origin / proxied through frontend)'}
+              </div>
+            </div>
+          </LoadingStateScreen>
         </div>
       )}
-      {isMobile && renderingError != null && (
+      {renderingError == null && videoRuntimeError != null && (
         <div {...stylex.props(styles.loadingScreenWrapper)}>
           <LoadingStateScreen
-            title="Well, this is embarrassing..."
-            description="This demo is not optimized for your device. Please try again on a different device with a larger screen."
-            linkProps={{to: '..', label: 'Back to homepage'}}
-          />
+            title="The video worker reported an error."
+            description="The page loaded, but the browser failed while fetching or preparing the video stream."
+            linkProps={{to: '..', label: 'Back to homepage'}}>
+            <div className="rounded-lg border border-black/10 bg-black/5 px-4 py-3 text-left text-sm text-[#4B5563]">
+              <div>Reason: {videoRuntimeFailureReason}</div>
+              <div className="mt-2 break-all">
+                Video API Endpoint:{' '}
+                {settings.videoAPIEndpoint ||
+                  '(same origin / proxied through frontend)'}
+              </div>
+            </div>
+          </LoadingStateScreen>
         </div>
       )}
-      {uploadingState !== 'default' && (
+      {renderingError != null && (
+        <div {...stylex.props(styles.loadingScreenWrapper)}>
+          <LoadingStateScreen
+            title="We hit a video rendering error."
+            description="The app reached the editor, but the browser could not finish initializing the video renderer."
+            linkProps={{to: '..', label: 'Back to homepage'}}>
+            <div className="rounded-lg border border-black/10 bg-black/5 px-4 py-3 text-left text-sm text-[#4B5563]">
+              <div>Reason: {renderingFailureReason}</div>
+              {isMobile && (
+                <div className="mt-2">
+                  The current viewport is smaller than the desktop layout the demo
+                  was designed for, so browser graphics limits can show up more
+                  quickly on mobile-sized screens.
+                </div>
+              )}
+            </div>
+          </LoadingStateScreen>
+        </div>
+      )}
+      {showUploadOverlay && (
         <div {...stylex.props(styles.loadingScreenWrapper)}>
           <UploadLoadingScreen />
         </div>
       )}
       <div {...stylex.props(styles.container)}>
-        <VideoEditor
-          video={inputVideo}
-          layers={layers}
-          loading={session == null}>
+        <VideoEditor video={inputVideo} layers={layers}>
           <div className="bg-graydark-800 w-full">
             <VideoFilmstripWithPlayback />
             <TrackletsAnnotation />

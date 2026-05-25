@@ -21,8 +21,9 @@ import {Effects} from '@/common/components/video/effects/Effects';
 import {
   DemoEffect,
   highlightEffects,
-} from '@/common/components/video/effects/EffectUtils';
+} from '@/common/components/effects/EffectsUtils';
 import {
+  AnnotationExportPayload,
   BaseTracklet,
   SegmentationPoint,
   StreamingState,
@@ -30,8 +31,11 @@ import {
 import type {DataArray} from '@/jscocotools/mask';
 import {atom} from 'jotai';
 
+export type VideoMode = 'preview' | 'ready';
+
 export type VideoData = {
-  path: string;
+  mode: VideoMode;
+  path: string | null;
   posterPath: string | null | undefined;
   url: string;
   posterUrl: string;
@@ -39,9 +43,80 @@ export type VideoData = {
   height: number;
 };
 
+type ReadyVideoSource = {
+  path: string;
+  posterPath: string | null | undefined;
+  url: string;
+  posterUrl: string | null | undefined;
+  width: number;
+  height: number;
+};
+
+type PreviewVideoSource = {
+  url: string;
+  width: number;
+  height: number;
+  posterUrl?: string | null;
+  posterPath?: string | null;
+};
+
+export function createReadyVideoData(video: ReadyVideoSource): VideoData {
+  return {
+    mode: 'ready',
+    path: video.path,
+    posterPath: video.posterPath ?? null,
+    url: video.url,
+    posterUrl: video.posterUrl ?? '',
+    width: video.width,
+    height: video.height,
+  };
+}
+
+export function createPreviewVideoData(video: PreviewVideoSource): VideoData {
+  return {
+    mode: 'preview',
+    path: null,
+    posterPath: video.posterPath ?? null,
+    url: video.url,
+    posterUrl: video.posterUrl ?? '',
+    width: video.width,
+    height: video.height,
+  };
+}
+
+export function isPreviewVideo(video: VideoData | null | undefined): boolean {
+  return video?.mode === 'preview' || video?.path == null;
+}
+
 export const frameIndexAtom = atom<number>(0);
 
 export const inputVideoAtom = atom<VideoData | null>(null);
+
+export type TrimRange = {
+  startFrame: number;
+  endFrameExclusive: number;
+};
+
+export const DEFAULT_TRIM_RANGE: TrimRange = {
+  startFrame: 0,
+  endFrameExclusive: 1,
+};
+
+export function clampTrimRange(
+  range: TrimRange,
+  totalFrames: number,
+): TrimRange {
+  const frameCount = Math.max(1, Math.floor(totalFrames));
+  const startFrame = 0;
+  const endFrameExclusive = Math.max(
+    1,
+    Math.min(frameCount, Math.floor(range.endFrameExclusive)),
+  );
+
+  return {startFrame, endFrameExclusive};
+}
+
+export const trimRangeAtom = atom<TrimRange>(DEFAULT_TRIM_RANGE);
 
 // #####################
 // SESSION
@@ -53,6 +128,9 @@ export type Session = {
 };
 
 export const sessionAtom = atom<Session | null>(null);
+
+export const annotationExportSnapshotAtom =
+  atom<AnnotationExportPayload | null>(null);
 
 // #####################
 // STREAMING/PLAYBACK
@@ -84,7 +162,7 @@ export type TrackletObject = {
   isInitialized: boolean;
 };
 
-const MAX_NUMBER_TRACKLET_OBJECTS = 3;
+export const MAX_NUMBER_TRACKLET_OBJECTS = 20;
 
 export const activeTrackletObjectIdAtom = atom<number | null>(0);
 
@@ -95,6 +173,10 @@ export const activeTrackletObjectAtom = atom<BaseTracklet | null>(get => {
 });
 
 export const trackletObjectsAtom = atom<BaseTracklet[]>([]);
+
+export type TrackletObjectNames = Record<number, string>;
+
+export const trackletObjectNamesAtom = atom<TrackletObjectNames>({});
 
 export const maxTrackletObjectIdAtom = atom<number>(get => {
   const tracklets = get(trackletObjectsAtom);
@@ -126,11 +208,7 @@ export const isAddObjectEnabledAtom = atom<boolean>(get => {
   const session = get(sessionAtom);
   const trackletsInitialized = get(areTrackletObjectsInitializedAtom);
   const isObjectLimitReached = get(isTrackletObjectLimitReachedAtom);
-  return (
-    session?.ranPropagation === false &&
-    trackletsInitialized &&
-    !isObjectLimitReached
-  );
+  return session != null && trackletsInitialized && !isObjectLimitReached;
 });
 
 export const codeEditorOpenedAtom = atom<boolean>(false);
@@ -178,6 +256,40 @@ export const messageMapAtom = atom<MessagesEventMap>(defaultMessageMap);
 // Upload state
 // #####################
 
-export const uploadingStateAtom = atom<'default' | 'uploading' | 'error'>(
-  'default',
-);
+export type UploadingState =
+  | 'default'
+  | 'uploading'
+  | 'uploaded'
+  | 'processing'
+  | 'ready'
+  | 'error';
+
+export type UploadSessionStatus =
+  | 'uploading'
+  | 'uploaded'
+  | 'processing'
+  | 'ready'
+  | 'error';
+
+export type UploadSession = {
+  uploadId: string | null;
+  status: UploadSessionStatus;
+  uploadedBytes: number;
+  totalBytes: number;
+  chunkSizeBytes: number | null;
+  objectUrl: string;
+  shouldRevokeObjectUrl: boolean;
+  controller: AbortController;
+  previewVideo: VideoData;
+  readyVideo: VideoData | null;
+  error: string | null;
+  sourceDurationSec: number;
+  selectedStartTimeSec: number;
+  selectedEndTimeSec: number;
+};
+
+export const uploadingStateAtom = atom<UploadingState>('default');
+
+export const uploadErrorAtom = atom<string | null>(null);
+
+export const uploadSessionAtom = atom<UploadSession | null>(null);

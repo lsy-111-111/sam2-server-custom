@@ -9,3 +9,5 @@ _C.*
 outputs/*
 checkpoints/*.pt
 demo/backend/checkpoints/*.pt
+demo/data/upload_sessions/
+demo/frontend/.yarn/install-state.gz

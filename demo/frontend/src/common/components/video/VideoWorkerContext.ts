@@ -23,24 +23,28 @@ import {
   Effect,
   EffectActionPoint,
   EffectFrameContext,
+  EffectInit,
   EffectOptions,
 } from '@/common/components/video/effects/Effect';
+import BaseGLEffect from '@/common/components/video/effects/BaseGLEffect';
+import EraseForegroundEffect from '@/common/components/video/effects/EraseForegroundEffect';
 import AllEffects, {
   EffectIndex,
   Effects,
 } from '@/common/components/video/effects/Effects';
+import Overlay2DEffect from '@/common/components/video/effects/Overlay2DEffect';
 import Logger from '@/common/logger/Logger';
-import {Mask, SegmentationPoint, Tracklet} from '@/common/tracker/Tracker';
+import {FrameRange, Mask, SegmentationPoint, Tracklet} from '@/common/tracker/Tracker';
 import {streamFile} from '@/common/utils/FileUtils';
 import {Stats} from '@/debug/stats/Stats';
 import {VIDEO_WATERMARK_TEXT} from '@/demo/DemoConfig';
 import CreateFilmstripError from '@/graphql/errors/CreateFilmstripError';
 import DrawFrameError from '@/graphql/errors/DrawFrameError';
-import WebGLContextError from '@/graphql/errors/WebGLContextError';
 import {RLEObject} from '@/jscocotools/mask';
 import invariant from 'invariant';
 import {CanvasForm} from 'pts';
 import {serializeError} from 'serialize-error';
+
 import {
   DecodeResponse,
   EffectUpdateResponse,
@@ -53,6 +57,11 @@ import {
   RenderingErrorResponse,
   VideoWorkerResponse,
 } from './VideoWorkerTypes';
+
+const WEBGL_FALLBACK_EFFECTS = {
+  Overlay: new Overlay2DEffect(),
+  EraseForeground: new EraseForegroundEffect(),
+} as const;
 
 function getEvenlySpacedItems(decodedVideo: DecodedVideo, x: number) {
   const p = Math.floor(decodedVideo.numFrames / Math.max(1, x - 1));
@@ -106,6 +115,8 @@ export default class VideoWorkerContext {
   private _currentSegmetationPoint: EffectActionPoint | null = null;
 
   private _effects: Effect[];
+  private _effectNames: Array<keyof Effects>;
+  private _supportsWorkerWebGL2: boolean;
   private _tracklets: Tracklet[] = [];
 
   public get width(): number {
@@ -120,79 +131,243 @@ export default class VideoWorkerContext {
     return this._frameIndex;
   }
 
+  public get totalFrames(): number {
+    return this._decodedVideo?.numFrames ?? this._decodedVideo?.frames.length ?? 0;
+  }
+
   public get currentFrame(): VideoFrame | null {
-    return this._decodedVideo?.frames[this._frameIndex].bitmap ?? null;
+    const frame = this._decodedVideo?.frames[this._clampFrameIndex(this._frameIndex)];
+    return frame?.bitmap ?? null;
+  }
+
+  private _getDecodedFrameCount(): number {
+    return this._decodedVideo?.frames.length ?? 0;
+  }
+
+  private _normalizeFrameRange(frameRange?: FrameRange): FrameRange {
+    const totalFrames = Math.max(1, this.totalFrames);
+    const startFrame = Math.min(
+      Math.max(0, Math.floor(frameRange?.startFrame ?? 0)),
+      totalFrames - 1,
+    );
+    const endFrameExclusive = Math.max(
+      startFrame + 1,
+      Math.min(
+        totalFrames,
+        Math.floor(frameRange?.endFrameExclusive ?? totalFrames),
+      ),
+    );
+    return {startFrame, endFrameExclusive};
+  }
+
+  private _getSeekableFrameCount(): number {
+    const decodedFrameCount = this._getDecodedFrameCount();
+    if (decodedFrameCount < 1) {
+      return 0;
+    }
+    return this._decodedVideo?.numFrames === decodedFrameCount
+      ? this._decodedVideo.numFrames
+      : decodedFrameCount;
+  }
+
+  private _clampFrameIndex(index: number): number {
+    const seekableFrameCount = this._getSeekableFrameCount();
+    if (seekableFrameCount < 1) {
+      return 0;
+    }
+    return Math.min(Math.max(0, index), seekableFrameCount - 1);
   }
 
   constructor() {
-    this._effects = [
-      AllEffects.Original, // Image as background
-      AllEffects.Overlay, // Masks on top
-    ];
+    this._effectNames = ['Original', 'Overlay'];
+    this._supportsWorkerWebGL2 = this._canUseWorkerWebGL2();
+    this._effects = this._effectNames.map((name, index) => {
+      return this._resolveEffectSelection(name, index as EffectIndex).effect;
+    });
 
     // Loading watermark fonts. This is going to be async, but by the time of
     // video encoding, the fonts should be available.
     this._loadWatermarkFonts();
   }
 
-  private initializeWebGLContext(width: number, height: number): void {
-    // Given that we use highlight and background effects as layers,
-    // we need to create two WebGL contexts, one for each set.
-    // To avoid memory leaks and too many active contexts,
-    // these contexts must be re-used over the lifecycle of the session.
+  private _canUseWorkerWebGL2(): boolean {
+    try {
+      return new OffscreenCanvas(1, 1).getContext('webgl2') != null;
+    } catch {
+      return false;
+    }
+  }
 
-    if (this._canvasHighlights == null && this._glObjects == null) {
-      this._canvasHighlights = new OffscreenCanvas(width, height);
-      this._glObjects = this._canvasHighlights.getContext('webgl2');
+  private _disposeWebGLContexts(): void {
+    this._glObjects = null;
+    this._glBackground = null;
+    this._canvasHighlights = null;
+    this._canvasBackground = null;
+  }
 
-      this._canvasHighlights.addEventListener(
-        'webglcontextlost',
-        event => {
-          event.preventDefault();
-          this._sendRenderingError(
-            new WebGLContextError('WebGL context lost.'),
-          );
-        },
-        false,
-      );
-    } else if (
-      this._canvasHighlights != null &&
-      (this._canvasHighlights.width !== width ||
-        this._canvasHighlights.height !== height)
-    ) {
-      // Resize canvas and webgl viewport
-      this._canvasHighlights.width = width;
-      this._canvasHighlights.height = height;
-      if (this._glObjects != null) {
-        this._glObjects.viewport(0, 0, width, height);
-      }
+  private _resolveEffectSelection(
+    requestedName: keyof Effects,
+    index: EffectIndex,
+  ): {name: keyof Effects; effect: Effect} {
+    if (this._supportsWorkerWebGL2) {
+      return {
+        name: requestedName,
+        effect: AllEffects[requestedName],
+      };
     }
 
-    if (this._canvasBackground == null && this._glBackground == null) {
-      this._canvasBackground = new OffscreenCanvas(width, height);
-      this._glBackground = this._canvasBackground.getContext('webgl2');
+    const effect = AllEffects[requestedName];
+    if (!(effect instanceof BaseGLEffect)) {
+      return {name: requestedName, effect};
+    }
 
-      this._canvasBackground.addEventListener(
-        'webglcontextlost',
-        event => {
-          event.preventDefault();
-          this._sendRenderingError(
-            new WebGLContextError('WebGL context lost.'),
-          );
-        },
-        false,
+    if (index === EffectIndex.BACKGROUND) {
+      return {
+        name: 'Original',
+        effect: AllEffects.Original,
+      };
+    }
+
+    if (requestedName === 'EraseForeground') {
+      return {
+        name: 'EraseForeground',
+        effect: WEBGL_FALLBACK_EFFECTS.EraseForeground,
+      };
+    }
+
+    return {
+      name: 'Overlay',
+      effect: WEBGL_FALLBACK_EFFECTS.Overlay,
+    };
+  }
+
+  private async _setupEffect(
+    effect: Effect,
+    index: EffectIndex,
+    width: number,
+    height: number,
+  ): Promise<void> {
+    if (effect instanceof BaseGLEffect) {
+      const offCanvas =
+        index === EffectIndex.BACKGROUND
+          ? this._canvasBackground
+          : this._canvasHighlights;
+      invariant(offCanvas != null, 'need OffscreenCanvas to render effects');
+      const webglContext =
+        index === EffectIndex.BACKGROUND ? this._glBackground : this._glObjects;
+      invariant(webglContext != null, 'need WebGL context to render effects');
+
+      const init: EffectInit = {
+        width,
+        height,
+        canvas: offCanvas,
+        gl: webglContext,
+      };
+      await effect.setup(init);
+      return;
+    }
+
+    await effect.setup({width, height});
+  }
+
+  private async _syncEffectsToRenderer(
+    width: number,
+    height: number,
+  ): Promise<void> {
+    for (let i = 0; i < this._effectNames.length; i++) {
+      const index = i as EffectIndex;
+      const currentEffect = this._effects[i];
+      const {name, effect} = this._resolveEffectSelection(
+        this._effectNames[i],
+        index,
       );
-    } else if (
-      this._canvasBackground != null &&
-      (this._canvasBackground.width != width ||
-        this._canvasBackground.height != height)
-    ) {
-      // Resize canvas and webgl viewport
-      this._canvasBackground.width = width;
-      this._canvasBackground.height = height;
-      if (this._glBackground != null) {
-        this._glBackground.viewport(0, 0, width, height);
+
+      if (currentEffect !== effect) {
+        await currentEffect.cleanup();
       }
+
+      await this._setupEffect(effect, index, width, height);
+      this._effects[i] = effect;
+      this._effectNames[i] = name;
+
+      this.sendResponse<EffectUpdateResponse>('effectUpdate', {
+        name,
+        index,
+        variant: effect.variant,
+        numVariants: effect.numVariants,
+      });
+    }
+  }
+
+  private initializeWebGLContext(width: number, height: number): boolean {
+    if (!this._supportsWorkerWebGL2) {
+      return false;
+    }
+
+    try {
+      if (this._canvasHighlights == null && this._glObjects == null) {
+        this._canvasHighlights = new OffscreenCanvas(width, height);
+        this._glObjects = this._canvasHighlights.getContext('webgl2');
+        if (this._glObjects == null) {
+          this._supportsWorkerWebGL2 = false;
+          this._disposeWebGLContexts();
+          return false;
+        }
+
+        this._canvasHighlights.addEventListener(
+          'webglcontextlost',
+          event => {
+            event.preventDefault();
+            this._sendRenderingError(new Error('WebGL context lost.'));
+          },
+          false,
+        );
+      } else if (
+        this._canvasHighlights != null &&
+        (this._canvasHighlights.width !== width ||
+          this._canvasHighlights.height !== height)
+      ) {
+        this._canvasHighlights.width = width;
+        this._canvasHighlights.height = height;
+        if (this._glObjects != null) {
+          this._glObjects.viewport(0, 0, width, height);
+        }
+      }
+
+      if (this._canvasBackground == null && this._glBackground == null) {
+        this._canvasBackground = new OffscreenCanvas(width, height);
+        this._glBackground = this._canvasBackground.getContext('webgl2');
+        if (this._glBackground == null) {
+          this._supportsWorkerWebGL2 = false;
+          this._disposeWebGLContexts();
+          return false;
+        }
+
+        this._canvasBackground.addEventListener(
+          'webglcontextlost',
+          event => {
+            event.preventDefault();
+            this._sendRenderingError(new Error('WebGL context lost.'));
+          },
+          false,
+        );
+      } else if (
+        this._canvasBackground != null &&
+        (this._canvasBackground.width != width ||
+          this._canvasBackground.height != height)
+      ) {
+        this._canvasBackground.width = width;
+        this._canvasBackground.height = height;
+        if (this._glBackground != null) {
+          this._glBackground.viewport(0, 0, width, height);
+        }
+      }
+
+      return true;
+    } catch {
+      this._supportsWorkerWebGL2 = false;
+      this._disposeWebGLContexts();
+      return false;
     }
   }
 
@@ -200,7 +375,7 @@ export default class VideoWorkerContext {
     this._canvas = canvas;
     this._ctx = canvas.getContext('2d');
     if (this._ctx == null) {
-      throw new Error('could not initialize drawing context');
+      throw new Error('Failed to initialize the OffscreenCanvas 2D context.');
     }
     this._form = new CanvasForm(this._ctx);
   }
@@ -216,6 +391,10 @@ export default class VideoWorkerContext {
   }
 
   public goToFrame(index: number): void {
+    if (this._getSeekableFrameCount() < 1) {
+      return;
+    }
+
     // Cancel any ongoing render
     this._cancelRender();
     this.updateFrameIndex(index);
@@ -233,12 +412,16 @@ export default class VideoWorkerContext {
       throw new Error('no decoded video');
     }
 
-    const {numFrames, fps} = this._decodedVideo;
+    if (this._getSeekableFrameCount() < 2) {
+      return;
+    }
+
+    const {fps} = this._decodedVideo;
     const timePerFrame = 1000 / (fps ?? 30);
     let startTime: number | null = null;
-    // The offset frame index compensate for cases where the video playback
+    // The offset frame index compensates for cases where the video playback
     // does not start at frame index 0.
-    const offsetFrameIndex = this._frameIndex;
+    const offsetFrameIndex = this._clampFrameIndex(this._frameIndex);
 
     const updateFrame = (time: number) => {
       if (startTime === null) {
@@ -247,9 +430,17 @@ export default class VideoWorkerContext {
 
       this._stats.fps?.begin();
 
+      const seekableFrameCount = this._getSeekableFrameCount();
+      if (seekableFrameCount < 2) {
+        this._stats.fps?.end();
+        this._playbackRAFHandle = requestAnimationFrame(updateFrame);
+        return;
+      }
+
       const diff = time - startTime;
       const expectedFrame =
-        (Math.floor(diff / timePerFrame) + offsetFrameIndex) % numFrames;
+        (Math.floor(diff / timePerFrame) + offsetFrameIndex) %
+        seekableFrameCount;
 
       if (this._frameIndex !== expectedFrame && !this._isDrawing) {
         // Update to the next expected frame
@@ -331,61 +522,50 @@ export default class VideoWorkerContext {
     index: EffectIndex,
     options?: EffectOptions,
   ): Promise<void> {
-    const effect: Effect = AllEffects[name];
+    const currentEffect = this._effects[index];
+    const {name: resolvedName, effect} = this._resolveEffectSelection(
+      name,
+      index,
+    );
 
-    // The effect has changed.
-    if (this._effects[index] !== effect) {
-      // Effect changed. Cleanup old effect first. Effects are responsible for
-      // cleaning up their memory.
-      await this._effects[index].cleanup();
+    if (currentEffect !== effect) {
+      await currentEffect.cleanup();
 
-      const offCanvas =
-        index === EffectIndex.BACKGROUND
-          ? this._canvasBackground
-          : this._canvasHighlights;
-      invariant(offCanvas != null, 'need OffscreenCanvas to render effects');
-      const webglContext =
-        index === EffectIndex.BACKGROUND ? this._glBackground : this._glObjects;
-      invariant(webglContext != null, 'need WebGL context to render effects');
-
-      // Initialize the effect. This can be used by effects to prepare
-      // resources needed for rendering. If the video wasn't decoded yet, the
-      // effect setup will happen in the _decodeVideo function.
       if (this._decodedVideo != null) {
-        await effect.setup({
-          width: this._decodedVideo.width,
-          height: this._decodedVideo.height,
-          canvas: offCanvas,
-          gl: webglContext,
-        });
+        await this._setupEffect(
+          effect,
+          index,
+          this._decodedVideo.width,
+          this._decodedVideo.height,
+        );
       }
     }
 
-    // Update effect if already set effect was clicked again. This can happen
-    // when there is a new variant of the effect.
     if (options != null) {
-      // Update effect if already set effect was clicked again. This can happen
-      // when there is a new variant of the effect.
       await effect.update(options);
     }
 
-    // Notify the frontend about the effect state including its variant.
     this.sendResponse<EffectUpdateResponse>('effectUpdate', {
-      name,
+      name: resolvedName,
       index,
       variant: effect.variant,
       numVariants: effect.numVariants,
     });
 
+    this._effectNames[index] = resolvedName;
     this._effects[index] = effect;
     this._playbackRAFHandle = requestAnimationFrame(this._drawFrame.bind(this));
   }
 
-  async encode() {
+  async encode(frameRange?: FrameRange) {
     const decodedVideo = this._decodedVideo;
     invariant(
       decodedVideo !== null,
       'cannot encode video because there is no decoded video available',
+    );
+    invariant(
+      decodedVideo.frames.length === decodedVideo.numFrames,
+      'cannot encode video because decoding is not complete',
     );
 
     const canvas = new OffscreenCanvas(this.width, this.height);
@@ -396,12 +576,15 @@ export default class VideoWorkerContext {
     );
 
     const form = new CanvasForm(ctx);
+    const normalizedFrameRange = this._normalizeFrameRange(frameRange);
+    const frameCount =
+      normalizedFrameRange.endFrameExclusive - normalizedFrameRange.startFrame;
 
     const file = await encodeVideo(
       this.width,
       this.height,
-      decodedVideo.frames.length,
-      this._framesGenerator(decodedVideo, canvas, form),
+      frameCount,
+      this._framesGenerator(decodedVideo, canvas, form, normalizedFrameRange),
       progress => {
         this.sendResponse<EncodingStateUpdateResponse>('encodingStateUpdate', {
           progress,
@@ -421,20 +604,28 @@ export default class VideoWorkerContext {
     decodedVideo: DecodedVideo,
     canvas: OffscreenCanvas,
     form: CanvasForm,
+    frameRange: FrameRange,
   ): AsyncGenerator<ImageFrame, undefined> {
     const frames = decodedVideo.frames;
+    const firstFrame = frames[frameRange.startFrame];
+    const timestampOffset = firstFrame?.timestamp ?? 0;
 
-    for (let frameIndex = 0; frameIndex < frames.length; ++frameIndex) {
+    for (
+      let frameIndex = frameRange.startFrame;
+      frameIndex < frameRange.endFrameExclusive;
+      ++frameIndex
+    ) {
       await this._drawFrameImpl(form, frameIndex, true);
 
       const frame = frames[frameIndex];
+      const shiftedTimestamp = Math.max(0, frame.timestamp - timestampOffset);
       const videoFrame = new VideoFrame(canvas, {
-        timestamp: frame.bitmap.timestamp,
+        timestamp: shiftedTimestamp,
       });
 
       yield {
         bitmap: videoFrame,
-        timestamp: frame.timestamp,
+        timestamp: shiftedTimestamp,
         duration: frame.duration,
       };
 
@@ -540,29 +731,8 @@ export default class VideoWorkerContext {
         renderedFirstFrame = true;
         canvas.width = width;
         canvas.height = height;
-        // Set WebGL contexts right after the first frame decoded
         this.initializeWebGLContext(width, height);
-
-        // Initialize effect once first frame was decoded.
-        for (const [i, effect] of this._effects.entries()) {
-          const offCanvas =
-            i === EffectIndex.BACKGROUND
-              ? this._canvasBackground
-              : this._canvasHighlights;
-          invariant(offCanvas != null, 'need canvas to render effects');
-          const webglContext =
-            i === EffectIndex.BACKGROUND ? this._glBackground : this._glObjects;
-          invariant(
-            webglContext != null,
-            'need WebGL context to render effects',
-          );
-          await effect.setup({
-            width,
-            height,
-            canvas: offCanvas,
-            gl: webglContext,
-          });
-        }
+        await this._syncEffectsToRenderer(width, height);
 
         // Need to render frame immediately. Cannot go through
         // requestAnimationFrame because then rendering this frame would be
@@ -589,6 +759,14 @@ export default class VideoWorkerContext {
     if (!renderedFirstFrame) {
       canvas.width = this._decodedVideo.width;
       canvas.height = this._decodedVideo.height;
+      this.initializeWebGLContext(
+        this._decodedVideo.width,
+        this._decodedVideo.height,
+      );
+      await this._syncEffectsToRenderer(
+        this._decodedVideo.width,
+        this._decodedVideo.height,
+      );
       this._drawFrame();
     }
 
@@ -627,6 +805,13 @@ export default class VideoWorkerContext {
 
     try {
       const frame = this._decodedVideo.frames[frameIndex];
+      if (frame == null) {
+        this._stats.videoFps?.end();
+        this._stats.total?.end();
+        this._stats.memory?.end();
+        this._isDrawing = false;
+        return;
+      }
       const {bitmap} = frame;
 
       this._stats.frameBmp?.begin();
@@ -714,8 +899,12 @@ export default class VideoWorkerContext {
       }
 
       this._isDrawing = false;
-    } catch {
-      this._sendRenderingError(new DrawFrameError('Failed to draw frame'));
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.length > 0
+          ? error.message
+          : 'Failed to draw frame';
+      this._sendRenderingError(new DrawFrameError(message));
     }
   }
 
@@ -767,9 +956,9 @@ export default class VideoWorkerContext {
   }
 
   private updateFrameIndex(index: number): void {
-    this._frameIndex = index;
+    this._frameIndex = this._clampFrameIndex(index);
     this.sendResponse<FrameUpdateResponse>('frameUpdate', {
-      index,
+      index: this._frameIndex,
     });
   }
 

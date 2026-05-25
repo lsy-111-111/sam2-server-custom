@@ -15,7 +15,11 @@
  */
 import PrimaryCTAButton from '@/common/components/button/PrimaryCTAButton';
 import useVideo from '@/common/components/video/editor/useVideo';
+import useReportError from '@/common/error/useReportError';
+import {annotationExportSnapshotAtom, trimRangeAtom} from '@/demo/atoms';
 import {ChevronRight} from '@carbon/icons-react';
+import {useAtomValue, useSetAtom} from 'jotai';
+import {useState} from 'react';
 
 type Props = {
   onSessionClose: () => void;
@@ -23,16 +27,40 @@ type Props = {
 
 export default function CloseSessionButton({onSessionClose}: Props) {
   const video = useVideo();
+  const reportError = useReportError();
+  const setAnnotationExportSnapshot = useSetAtom(annotationExportSnapshotAtom);
+  const trimRange = useAtomValue(trimRangeAtom);
+  const [isClosing, setIsClosing] = useState(false);
 
-  function handleCloseSession() {
-    video?.closeSession();
-    video?.logAnnotations();
-    onSessionClose();
+  async function handleCloseSession() {
+    if (video == null || isClosing) {
+      return;
+    }
+
+    try {
+      setIsClosing(true);
+      const annotationSnapshot = await video.exportAnnotations(1, true, trimRange);
+      if (annotationSnapshot == null) {
+        throw new Error(
+          'Could not capture annotation data before closing the session.',
+        );
+      }
+      setAnnotationExportSnapshot(annotationSnapshot);
+      await video.closeSession();
+      onSessionClose();
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setIsClosing(false);
+    }
   }
 
   return (
-    <PrimaryCTAButton onClick={handleCloseSession} endIcon={<ChevronRight />}>
-      Good to go
+    <PrimaryCTAButton
+      onClick={handleCloseSession}
+      disabled={video == null || isClosing}
+      endIcon={<ChevronRight />}>
+      {isClosing ? 'Preparing export...' : 'Good to go'}
     </PrimaryCTAButton>
   );
 }

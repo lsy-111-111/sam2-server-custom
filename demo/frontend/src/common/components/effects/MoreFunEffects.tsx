@@ -26,6 +26,10 @@ export default function MoreFunEffects() {
   const setEffect = useVideoEffect();
   const activeEffect = useAtomValue(activeHighlightEffectAtom);
 
+  if (moreEffects.length === 0) {
+    return null;
+  }
+
   return (
     <ToolbarSection title="Selected Objects" borderBottom={true}>
       {moreEffects.map(effect => {

@@ -22,6 +22,19 @@ export type Settings = {
 
 // Key used to store the settings in the browser's local storage.
 export const SAM2_SETTINGS_KEY = 'SAM2_SETTINGS_KEY';
+const LEGACY_LOCALHOST_API_ENDPOINT = 'http://localhost:7263';
+const LEGACY_LOOPBACK_API_ENDPOINT = 'http://127.0.0.1:7263';
+
+function normalizeEndpoint(url: string): string {
+  return url.trim().replace(/[/.]+$/, '');
+}
+
+function isLegacyLocalEndpoint(url: string): boolean {
+  return (
+    url === LEGACY_LOCALHOST_API_ENDPOINT ||
+    url === LEGACY_LOOPBACK_API_ENDPOINT
+  );
+}
 
 export type Action =
   | {type: 'load-state'}
@@ -33,6 +46,29 @@ export const DEFAULT_SETTINGS: Settings = {
   inferenceAPIEndpoint: INFERENCE_API_ENDPOINT,
 };
 
+function migrateEndpoint(url: string, defaultValue: string): string {
+  const normalized = normalizeEndpoint(url);
+
+  if (isLegacyLocalEndpoint(normalized)) {
+    return defaultValue;
+  }
+
+  return normalized;
+}
+
+function migrateSettings(state: Partial<Settings>): Settings {
+  return {
+    videoAPIEndpoint: migrateEndpoint(
+      state.videoAPIEndpoint ?? VIDEO_API_ENDPOINT,
+      VIDEO_API_ENDPOINT,
+    ),
+    inferenceAPIEndpoint: migrateEndpoint(
+      state.inferenceAPIEndpoint ?? INFERENCE_API_ENDPOINT,
+      INFERENCE_API_ENDPOINT,
+    ),
+  };
+}
+
 export function settingsReducer(state: Settings, action: Action): Settings {
   function storeSettings(newState: Settings): void {
     localStorage.setItem(SAM2_SETTINGS_KEY, JSON.stringify(newState));
@@ -43,7 +79,11 @@ export function settingsReducer(state: Settings, action: Action): Settings {
       try {
         const serializedSettings = localStorage.getItem(SAM2_SETTINGS_KEY);
         if (serializedSettings != null) {
-          return JSON.parse(serializedSettings) as Settings;
+          const loadedState = migrateSettings(
+            JSON.parse(serializedSettings) as Partial<Settings>,
+          );
+          storeSettings(loadedState);
+          return loadedState;
         } else {
           // Store default settings in local storage. This will populate the
           // settings in the local storage on first app load or when user

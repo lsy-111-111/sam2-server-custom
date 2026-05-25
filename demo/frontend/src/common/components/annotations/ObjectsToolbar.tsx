@@ -26,9 +26,10 @@ import {
   isAddObjectEnabledAtom,
   isFirstClickMadeAtom,
   isTrackletObjectLimitReachedAtom,
+  trackletObjectNamesAtom,
   trackletObjectsAtom,
 } from '@/demo/atoms';
-import {useAtomValue, useSetAtom} from 'jotai';
+import {useAtom, useAtomValue, useSetAtom} from 'jotai';
 
 type Props = {
   onTabChange: (newIndex: number) => void;
@@ -38,9 +39,14 @@ export default function ObjectsToolbar({onTabChange}: Props) {
   const tracklets = useAtomValue(trackletObjectsAtom);
   const activeTracklet = useAtomValue(activeTrackletObjectAtom);
   const setActiveTrackletId = useSetAtom(activeTrackletObjectIdAtom);
+  const [objectNames, setObjectNames] = useAtom(trackletObjectNamesAtom);
   const isFirstClickMade = useAtomValue(isFirstClickMadeAtom);
   const isObjectLimitReached = useAtomValue(isTrackletObjectLimitReachedAtom);
   const isAddObjectEnabled = useAtomValue(isAddObjectEnabledAtom);
+
+  function handleObjectNameChange(objectId: number, name: string) {
+    setObjectNames(prev => ({...prev, [objectId]: name}));
+  }
 
   if (!isFirstClickMade) {
     return <FirstClickView />;
@@ -54,9 +60,11 @@ export default function ObjectsToolbar({onTabChange}: Props) {
           return (
             <ToolbarObject
               key={tracklet.id}
-              label={getObjectLabel(tracklet)}
+              label={getObjectLabel(tracklet, objectNames)}
               tracklet={tracklet}
               isActive={activeTracklet?.id === tracklet.id}
+              objectName={objectNames[tracklet.id] ?? ''}
+              onNameChange={handleObjectNameChange}
               onClick={() => {
                 setActiveTrackletId(tracklet.id);
               }}

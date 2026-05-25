@@ -76,7 +76,7 @@ self.addEventListener(
 
         // Encode
         case 'encode': {
-          await context.encode();
+          await context.encode(event.data.frameRange);
           break;
         }
 
@@ -110,7 +110,7 @@ self.addEventListener(
           await tracker?.deleteTracklet(event.data.trackletId);
           break;
         case 'closeSession':
-          tracker?.closeSession();
+          await tracker?.closeSession();
           break;
         case 'updatePoints': {
           const {frameIndex, objectId, points} = event.data;
@@ -127,11 +127,23 @@ self.addEventListener(
           await tracker?.clearPointsInVideo();
           break;
         case 'streamMasks': {
-          const {frameIndex} = event.data;
+          const {frameIndex, frameRange} = event.data;
           context.allowEffectAnimation(false);
-          await tracker?.streamMasks(frameIndex);
+          await tracker?.streamMasks(frameIndex, frameRange);
           break;
         }
+        case 'exportAnnotations': {
+          const {everyNFrames, onlyAnnotatedFrames, frameRange} = event.data;
+          await tracker?.exportAnnotations(
+            everyNFrames ?? 1,
+            onlyAnnotatedFrames ?? true,
+            frameRange,
+          );
+          break;
+        }
+        case 'trimTrackletsToRange':
+          await tracker?.trimTrackletsToRange(event.data.frameRange);
+          break;
         case 'abortStreamMasks':
           tracker?.abortStreamMasks();
           break;

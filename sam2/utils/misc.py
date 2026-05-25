@@ -6,7 +6,8 @@
 
 import os
 import warnings
-from threading import Thread
+from collections import OrderedDict
+from threading import Lock, Thread
 
 import numpy as np
 import torch
@@ -169,6 +170,163 @@ class AsyncVideoFrameLoader:
         return len(self.images)
 
 
+class HybridVideoFrameLoader:
+    """
+    Keep CPU-normalized frames as the source of truth while opportunistically caching
+    a working set on GPU.
+    """
+
+    def __init__(
+        self,
+        cpu_images,
+        video_height,
+        video_width,
+        compute_device,
+        gpu_high_watermark_gb,
+        gpu_low_watermark_gb,
+        prefetch_ahead_frames,
+        retain_behind_frames,
+    ):
+        self.cpu_images = cpu_images
+        self.video_height = video_height
+        self.video_width = video_width
+        self.compute_device = compute_device
+        self.gpu_high_watermark_gb = gpu_high_watermark_gb
+        self.gpu_low_watermark_gb = min(gpu_low_watermark_gb, gpu_high_watermark_gb)
+        self.prefetch_ahead_frames = prefetch_ahead_frames
+        self.retain_behind_frames = retain_behind_frames
+        self.gpu_cache = OrderedDict()
+        self.lock = Lock()
+        self.prefetch_count = 0
+        self.eviction_count = 0
+
+    def __len__(self):
+        return len(self.cpu_images)
+
+    def __getitem__(self, index):
+        if self.compute_device.type != "cuda":
+            return self.cpu_images[index]
+
+        with self.lock:
+            cached = self.gpu_cache.get(index)
+            if cached is not None:
+                self.gpu_cache.move_to_end(index)
+                return cached
+
+            frame = self.cpu_images[index].to(self.compute_device, non_blocking=True)
+            self.gpu_cache[index] = frame
+            self.gpu_cache.move_to_end(index)
+            self._trim_cache_locked(
+                current_frame_idx=index,
+                reverse=False,
+                force_to_low=False,
+                protected_indices={index},
+            )
+            return self.gpu_cache.get(index, frame)
+
+    def prefetch(self, current_frame_idx, reverse=False):
+        if self.compute_device.type != "cuda" or self.prefetch_ahead_frames <= 0:
+            return
+
+        with self.lock:
+            for step in range(1, self.prefetch_ahead_frames + 1):
+                if self._reserved_memory_gb() >= self.gpu_high_watermark_gb:
+                    break
+                idx = current_frame_idx - step if reverse else current_frame_idx + step
+                if idx < 0 or idx >= len(self.cpu_images):
+                    break
+                if idx in self.gpu_cache:
+                    self.gpu_cache.move_to_end(idx)
+                    continue
+                self.gpu_cache[idx] = self.cpu_images[idx].to(
+                    self.compute_device, non_blocking=True
+                )
+                self.gpu_cache.move_to_end(idx)
+                self.prefetch_count += 1
+
+            self._trim_cache_locked(
+                current_frame_idx=current_frame_idx,
+                reverse=reverse,
+                force_to_low=False,
+            )
+
+    def trim(self, current_frame_idx, reverse=False, force_to_low=False):
+        if self.compute_device.type != "cuda":
+            return
+
+        with self.lock:
+            self._trim_cache_locked(
+                current_frame_idx=current_frame_idx,
+                reverse=reverse,
+                force_to_low=force_to_low,
+            )
+
+    def clear_gpu_cache(self):
+        if self.compute_device.type != "cuda":
+            return
+
+        with self.lock:
+            self.gpu_cache.clear()
+
+    def get_stats(self):
+        return {
+            "gpu_cached_frames": len(self.gpu_cache),
+            "prefetch_count": self.prefetch_count,
+            "eviction_count": self.eviction_count,
+        }
+
+    def _trim_cache_locked(
+        self,
+        current_frame_idx,
+        reverse=False,
+        force_to_low=False,
+        protected_indices=None,
+    ):
+        keep_indices = self._build_keep_indices(current_frame_idx, reverse=reverse)
+        if protected_indices:
+            keep_indices.update(protected_indices)
+
+        stale_indices = [idx for idx in list(self.gpu_cache.keys()) if idx not in keep_indices]
+        for idx in stale_indices:
+            self.gpu_cache.pop(idx, None)
+            self.eviction_count += 1
+
+        target_reserved_gb = (
+            self.gpu_low_watermark_gb if force_to_low else self.gpu_high_watermark_gb
+        )
+        while self.gpu_cache and self._reserved_memory_gb() > target_reserved_gb:
+            evict_idx = None
+            for idx in self.gpu_cache.keys():
+                if idx not in keep_indices:
+                    evict_idx = idx
+                    break
+            if evict_idx is None:
+                for idx in self.gpu_cache.keys():
+                    if idx != current_frame_idx:
+                        evict_idx = idx
+                        break
+            if evict_idx is None:
+                break
+            self.gpu_cache.pop(evict_idx, None)
+            self.eviction_count += 1
+
+    def _build_keep_indices(self, current_frame_idx, reverse=False):
+        keep_indices = {current_frame_idx}
+        if reverse:
+            start = max(0, current_frame_idx - self.prefetch_ahead_frames)
+            end = min(len(self.cpu_images), current_frame_idx + self.retain_behind_frames + 1)
+        else:
+            start = max(0, current_frame_idx - self.retain_behind_frames)
+            end = min(len(self.cpu_images), current_frame_idx + self.prefetch_ahead_frames + 1)
+        keep_indices.update(range(start, end))
+        return keep_indices
+
+    def _reserved_memory_gb(self):
+        if self.compute_device.type != "cuda" or not torch.cuda.is_available():
+            return 0.0
+        return torch.cuda.memory_reserved(self.compute_device) / 1024**3
+
+
 def load_video_frames(
     video_path,
     image_size,
@@ -177,6 +335,7 @@ def load_video_frames(
     img_std=(0.229, 0.224, 0.225),
     async_loading_frames=False,
     compute_device=torch.device("cuda"),
+    hybrid_cache_settings=None,
 ):
     """
     Load the video frames from video_path. The frames are resized to image_size as in
@@ -193,6 +352,7 @@ def load_video_frames(
             img_mean=img_mean,
             img_std=img_std,
             compute_device=compute_device,
+            hybrid_cache_settings=hybrid_cache_settings,
         )
     elif is_str and os.path.isdir(video_path):
         return load_video_frames_from_jpg_images(
@@ -203,6 +363,7 @@ def load_video_frames(
             img_std=img_std,
             async_loading_frames=async_loading_frames,
             compute_device=compute_device,
+            hybrid_cache_settings=hybrid_cache_settings,
         )
     else:
         raise NotImplementedError(
@@ -218,6 +379,7 @@ def load_video_frames_from_jpg_images(
     img_std=(0.229, 0.224, 0.225),
     async_loading_frames=False,
     compute_device=torch.device("cuda"),
+    hybrid_cache_settings=None,
 ):
     """
     Load the video frames from a directory of JPEG files ("<frame_index>.jpg" format).
@@ -253,6 +415,14 @@ def load_video_frames_from_jpg_images(
     img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
     img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
 
+    if async_loading_frames and hybrid_cache_settings is not None:
+        warnings.warn(
+            "Hybrid frame cache does not support async JPEG loading; falling back to synchronous loading.",
+            category=UserWarning,
+            stacklevel=2,
+        )
+        async_loading_frames = False
+
     if async_loading_frames:
         lazy_images = AsyncVideoFrameLoader(
             img_paths,
@@ -267,6 +437,21 @@ def load_video_frames_from_jpg_images(
     images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
     for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (JPEG)")):
         images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
+    if hybrid_cache_settings is not None and not offload_video_to_cpu:
+        images -= img_mean
+        images /= img_std
+        hybrid_images = HybridVideoFrameLoader(
+            cpu_images=images,
+            video_height=video_height,
+            video_width=video_width,
+            compute_device=compute_device,
+            gpu_high_watermark_gb=hybrid_cache_settings["gpu_high_watermark_gb"],
+            gpu_low_watermark_gb=hybrid_cache_settings["gpu_low_watermark_gb"],
+            prefetch_ahead_frames=hybrid_cache_settings["prefetch_ahead_frames"],
+            retain_behind_frames=hybrid_cache_settings["retain_behind_frames"],
+        )
+        return hybrid_images, video_height, video_width
+
     if not offload_video_to_cpu:
         images = images.to(compute_device)
         img_mean = img_mean.to(compute_device)
@@ -284,6 +469,7 @@ def load_video_frames_from_video_file(
     img_mean=(0.485, 0.456, 0.406),
     img_std=(0.229, 0.224, 0.225),
     compute_device=torch.device("cuda"),
+    hybrid_cache_settings=None,
 ):
     """Load the video frames from a video file."""
     import decord
@@ -299,6 +485,21 @@ def load_video_frames_from_video_file(
         images.append(frame.permute(2, 0, 1))
 
     images = torch.stack(images, dim=0).float() / 255.0
+    if hybrid_cache_settings is not None and not offload_video_to_cpu:
+        images -= img_mean
+        images /= img_std
+        hybrid_images = HybridVideoFrameLoader(
+            cpu_images=images,
+            video_height=video_height,
+            video_width=video_width,
+            compute_device=compute_device,
+            gpu_high_watermark_gb=hybrid_cache_settings["gpu_high_watermark_gb"],
+            gpu_low_watermark_gb=hybrid_cache_settings["gpu_low_watermark_gb"],
+            prefetch_ahead_frames=hybrid_cache_settings["prefetch_ahead_frames"],
+            retain_behind_frames=hybrid_cache_settings["retain_behind_frames"],
+        )
+        return hybrid_images, video_height, video_width
+
     if not offload_video_to_cpu:
         images = images.to(compute_device)
         img_mean = img_mean.to(compute_device)

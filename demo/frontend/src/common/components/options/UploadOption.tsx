@@ -16,8 +16,14 @@
 import useUploadVideo from '@/common/components/gallery/useUploadVideo';
 import OptionButton from '@/common/components/options/OptionButton';
 import Logger from '@/common/logger/Logger';
+import {getErrorSummary} from '@/common/error/ErrorUtils';
 import useScreenSize from '@/common/screen/useScreenSize';
-import {sessionAtom, uploadingStateAtom} from '@/demo/atoms';
+import {
+  sessionAtom,
+  trackletObjectNamesAtom,
+  uploadErrorAtom,
+  uploadingStateAtom,
+} from '@/demo/atoms';
 import {MAX_UPLOAD_FILE_SIZE} from '@/demo/DemoConfig';
 import {Close, CloudUpload} from '@carbon/icons-react';
 import {useSetAtom} from 'jotai';
@@ -31,7 +37,9 @@ export default function UploadOption({onUpload}: Props) {
   const navigate = useNavigate();
   const {isMobile} = useScreenSize();
   const setUploadingState = useSetAtom(uploadingStateAtom);
+  const setUploadError = useSetAtom(uploadErrorAtom);
   const setSession = useSetAtom(sessionAtom);
+  const setTrackletObjectNames = useSetAtom(trackletObjectNamesAtom);
 
   const {getRootProps, getInputProps, isUploading, error} = useUploadVideo({
     onUpload: videoData => {
@@ -40,14 +48,16 @@ export default function UploadOption({onUpload}: Props) {
         {state: {video: videoData}},
       );
       onUpload();
-      setUploadingState('default');
       setSession(null);
+      setTrackletObjectNames({});
     },
-    onUploadError: (error: Error) => {
+    onUploadError: (uploadError: Error) => {
+      setUploadError(getErrorSummary(uploadError));
       setUploadingState('error');
-      Logger.error(error);
+      Logger.error(uploadError);
     },
     onUploadStart: () => {
+      setUploadError(null);
       setUploadingState('uploading');
     },
   });

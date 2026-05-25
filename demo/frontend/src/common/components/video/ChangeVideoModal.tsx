@@ -16,8 +16,14 @@
 import type {VideoGalleryTriggerProps} from '@/common/components/gallery/DemoVideoGalleryModal';
 import DemoVideoGalleryModal from '@/common/components/gallery/DemoVideoGalleryModal';
 import useVideo from '@/common/components/video/editor/useVideo';
+import {getErrorSummary} from '@/common/error/ErrorUtils';
 import Logger from '@/common/logger/Logger';
-import {isStreamingAtom, uploadingStateAtom, VideoData} from '@/demo/atoms';
+import {
+  isStreamingAtom,
+  uploadErrorAtom,
+  uploadingStateAtom,
+  VideoData,
+} from '@/demo/atoms';
 import {useAtomValue, useSetAtom} from 'jotai';
 import {ComponentType, useCallback} from 'react';
 import {useNavigate} from 'react-router-dom';
@@ -35,6 +41,7 @@ export default function ChangeVideoModal({
 }: Props) {
   const isStreaming = useAtomValue(isStreamingAtom);
   const setUploadingState = useSetAtom(uploadingStateAtom);
+  const setUploadError = useSetAtom(uploadErrorAtom);
   const video = useVideo();
   const navigate = useNavigate();
 
@@ -67,6 +74,7 @@ export default function ChangeVideoModal({
   }
 
   function handleUploadVideoError(error: Error) {
+    setUploadError(getErrorSummary(error));
     setUploadingState('error');
     Logger.error(error);
   }

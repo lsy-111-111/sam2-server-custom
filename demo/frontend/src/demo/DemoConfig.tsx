@@ -31,8 +31,8 @@ export const ABOUT_URL = 'https://ai.meta.com/sam2';
 export const EMAIL_ADDRESS = 'segment-anything@meta.com';
 export const BLOG_URL = 'http://ai.meta.com/blog/sam2';
 
-export const VIDEO_API_ENDPOINT = 'http://localhost:7263';
-export const INFERENCE_API_ENDPOINT = 'http://localhost:7263';
+export const VIDEO_API_ENDPOINT = '';
+export const INFERENCE_API_ENDPOINT = '';
 
 export const demoObjectLimit = 3;
 
@@ -41,4 +41,6 @@ export const DEFAULT_EFFECT_LAYERS: EffectLayers = {
   highlight: 'Overlay',
 };
 
-export const MAX_UPLOAD_FILE_SIZE = '70MB';
+export const MAX_UPLOAD_FILE_SIZE_MB = 1000;
+export const MAX_UPLOAD_FILE_SIZE = `${MAX_UPLOAD_FILE_SIZE_MB}MB`;
+export const MAX_UPLOAD_VIDEO_DURATION_SECONDS = 600;

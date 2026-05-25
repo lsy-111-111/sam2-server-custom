@@ -23,6 +23,7 @@ import {
   LoadStartEvent,
   RenderingErrorEvent,
 } from './VideoWorkerBridge';
+import type {FrameRange} from '@/common/tracker/Tracker';
 import {EffectOptions} from './effects/Effect';
 import type {Effects} from './effects/Effects';
 
@@ -69,7 +70,12 @@ export type SetEffectRequest = Request<
   }
 >;
 
-export type EncodeVideoRequest = Request<'encode', unknown>;
+export type EncodeVideoRequest = Request<
+  'encode',
+  {
+    frameRange?: FrameRange;
+  }
+>;
 
 export type EnableStatsRequest = Request<'enableStats', unknown>;
 

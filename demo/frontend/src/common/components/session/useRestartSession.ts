@@ -18,9 +18,11 @@ import useVideo from '@/common/components/video/editor/useVideo';
 import useInputVideo from '@/common/components/video/useInputVideo';
 import {
   activeTrackletObjectIdAtom,
+  annotationExportSnapshotAtom,
   isPlayingAtom,
   isStreamingAtom,
   labelTypeAtom,
+  trackletObjectNamesAtom,
   trackletObjectsAtom,
 } from '@/demo/atoms';
 import {useAtomValue, useSetAtom} from 'jotai';
@@ -31,7 +33,9 @@ export default function useRestartSession() {
   const isPlaying = useAtomValue(isPlayingAtom);
   const isStreaming = useAtomValue(isStreamingAtom);
   const setActiveTrackletObjectId = useSetAtom(activeTrackletObjectIdAtom);
+  const setAnnotationExportSnapshot = useSetAtom(annotationExportSnapshotAtom);
   const setTracklets = useSetAtom(trackletObjectsAtom);
+  const setTrackletObjectNames = useSetAtom(trackletObjectNamesAtom);
   const setLabelType = useSetAtom(labelTypeAtom);
   const {clearMessage} = useMessagesSnackbar();
 
@@ -39,7 +43,7 @@ export default function useRestartSession() {
   const video = useVideo();
 
   async function restartSession(onRestart?: () => void) {
-    if (video === null || inputVideo === null) {
+    if (video === null || inputVideo === null || inputVideo.path == null) {
       return;
     }
 
@@ -50,10 +54,12 @@ export default function useRestartSession() {
     if (isStreaming) {
       await video.abortStreamMasks();
     }
-    await video?.startSession(inputVideo.path);
+    setAnnotationExportSnapshot(null);
+    await video.startSession(inputVideo.path);
     video.frame = 0;
     setActiveTrackletObjectId(0);
     setTracklets([]);
+    setTrackletObjectNames({});
     setLabelType('positive');
     onRestart?.();
     clearMessage();

@@ -13,12 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import {
+  effectPresets,
+} from '@/common/components/effects/EffectsUtils';
 import ToolbarHeaderWrapper from '@/common/components/toolbar/ToolbarHeaderWrapper';
 import useVideoEffect from '@/common/components/video/editor/useVideoEffect';
-import {
-  EffectIndex,
-  effectPresets,
-} from '@/common/components/video/effects/Effects';
+import {EffectIndex} from '@/common/components/video/effects/Effects';
 import {BLUE_PINK_FILL} from '@/theme/gradientStyle';
 import {MagicWandFilled} from '@carbon/icons-react';
 import {useCallback, useRef} from 'react';

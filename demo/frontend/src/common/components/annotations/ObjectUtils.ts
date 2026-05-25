@@ -14,7 +14,18 @@
  * limitations under the License.
  */
 import {BaseTracklet} from '@/common/tracker/Tracker';
+import {TrackletObjectNames} from '@/demo/atoms';
 
-export function getObjectLabel(tracklet: BaseTracklet) {
+export function getDefaultObjectLabel(tracklet: BaseTracklet | {id: number}) {
   return `Object ${tracklet.id + 1}`;
+}
+
+export function getObjectLabel(
+  tracklet: BaseTracklet | {id: number},
+  objectNames: TrackletObjectNames = {},
+) {
+  const objectName = objectNames[tracklet.id]?.trim();
+  return objectName != null && objectName.length > 0
+    ? objectName
+    : getDefaultObjectLabel(tracklet);
 }

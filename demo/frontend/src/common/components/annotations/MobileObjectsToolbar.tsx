@@ -18,8 +18,12 @@ import ObjectsToolbarBottomActions from '@/common/components/annotations/Objects
 import {getObjectLabel} from '@/common/components/annotations/ObjectUtils';
 import ToolbarObject from '@/common/components/annotations/ToolbarObject';
 import MobileFirstClickBanner from '@/common/components/MobileFirstClickBanner';
-import {activeTrackletObjectAtom, isFirstClickMadeAtom} from '@/demo/atoms';
-import {useAtomValue} from 'jotai';
+import {
+  activeTrackletObjectAtom,
+  isFirstClickMadeAtom,
+  trackletObjectNamesAtom,
+} from '@/demo/atoms';
+import {useAtom, useAtomValue} from 'jotai';
 
 type Props = {
   onTabChange: (newIndex: number) => void;
@@ -28,6 +32,11 @@ type Props = {
 export default function MobileObjectsToolbar({onTabChange}: Props) {
   const activeTracklet = useAtomValue(activeTrackletObjectAtom);
   const isFirstClickMade = useAtomValue(isFirstClickMadeAtom);
+  const [objectNames, setObjectNames] = useAtom(trackletObjectNamesAtom);
+
+  function handleObjectNameChange(objectId: number, name: string) {
+    setObjectNames(prev => ({...prev, [objectId]: name}));
+  }
 
   if (!isFirstClickMade) {
     return <MobileFirstClickBanner />;
@@ -38,10 +47,12 @@ export default function MobileObjectsToolbar({onTabChange}: Props) {
       <MobileObjectsToolbarHeader />
       {activeTracklet != null && (
         <ToolbarObject
-          label={getObjectLabel(activeTracklet)}
+          label={getObjectLabel(activeTracklet, objectNames)}
           tracklet={activeTracklet}
           isActive={true}
           isMobile={true}
+          objectName={objectNames[activeTracklet.id] ?? ''}
+          onNameChange={handleObjectNameChange}
         />
       )}
 

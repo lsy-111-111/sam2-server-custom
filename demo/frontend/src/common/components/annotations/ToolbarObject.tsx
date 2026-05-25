@@ -23,11 +23,15 @@ import emptyFunction from '@/common/utils/emptyFunction';
 import {activeTrackletObjectIdAtom} from '@/demo/atoms';
 import {useSetAtom} from 'jotai';
 
+const MAX_OBJECT_NAME_LENGTH = 80;
+
 type Props = {
   label: string;
   tracklet: BaseTracklet;
   isActive: boolean;
   isMobile?: boolean;
+  objectName?: string;
+  onNameChange?: (objectId: number, name: string) => void;
   onClick?: () => void;
   onThumbnailClick?: () => void;
 };
@@ -37,6 +41,8 @@ export default function ToolbarObject({
   tracklet,
   isActive,
   isMobile = false,
+  objectName = '',
+  onNameChange,
   onClick,
   onThumbnailClick = emptyFunction,
 }: Props) {
@@ -51,6 +57,14 @@ export default function ToolbarObject({
     } finally {
       setActiveTrackletId(null);
     }
+  }
+
+  function handleNameInputClick(event: React.MouseEvent<HTMLInputElement>) {
+    event.stopPropagation();
+  }
+
+  function handleNameInputChange(event: React.ChangeEvent<HTMLInputElement>) {
+    onNameChange?.(tracklet.id, event.target.value);
   }
 
   if (!tracklet.isInitialized) {
@@ -82,6 +96,20 @@ export default function ToolbarObject({
         />
       }
       isMobile={isMobile}>
+      {isActive && onNameChange != null && (
+        <label className="mt-2 block text-xs font-medium text-gray-300 md:ml-2">
+          Object name
+          <input
+            type="text"
+            value={objectName}
+            maxLength={MAX_OBJECT_NAME_LENGTH}
+            placeholder={label}
+            onClick={handleNameInputClick}
+            onChange={handleNameInputChange}
+            className="mt-1 w-full rounded-md border border-white/10 bg-white/10 px-3 py-2 text-sm text-white outline-none placeholder:text-gray-500 focus:border-blue-400"
+          />
+        </label>
+      )}
       <ObjectActions objectId={tracklet.id} active={isActive} />
     </ToolbarObjectContainer>
   );

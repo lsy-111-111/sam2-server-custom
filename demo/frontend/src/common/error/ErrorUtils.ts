@@ -24,8 +24,17 @@ export type RenderingErrorType =
   | 'create_filmstrip'
   | 'error';
 
-export function getRenderErrorType(error?: ErrorObject): RenderingErrorType {
-  const deserializedError = deserializeError(error);
+function normalizeError(error?: Error | ErrorObject | null): Error | null {
+  if (error == null) {
+    return null;
+  }
+  return error instanceof Error ? error : deserializeError(error);
+}
+
+export function getRenderErrorType(
+  error?: Error | ErrorObject | null,
+): RenderingErrorType {
+  const deserializedError = normalizeError(error);
 
   if (deserializedError instanceof WebGLContextError) {
     return 'webgl_context';
@@ -37,6 +46,54 @@ export function getRenderErrorType(error?: ErrorObject): RenderingErrorType {
     return 'create_filmstrip';
   }
   return 'error';
+}
+
+export function getErrorMessage(
+  error?: Error | ErrorObject | null,
+): string | null {
+  const normalizedError = normalizeError(error);
+  const message = normalizedError?.message?.trim();
+  return message != null && message.length > 0 ? message : null;
+}
+
+export function getErrorName(error?: Error | ErrorObject | null): string | null {
+  const normalizedError = normalizeError(error);
+  const name = normalizedError?.name?.trim();
+  return name != null && name.length > 0 ? name : null;
+}
+
+export function getErrorSummary(error?: Error | ErrorObject | null): string {
+  const name = getErrorName(error);
+  const message = getErrorMessage(error);
+
+  if (name != null && message != null && message !== name) {
+    return `${name}: ${message}`;
+  }
+  return message ?? name ?? 'Unknown error';
+}
+
+export function getRenderErrorSummary(
+  error?: Error | ErrorObject | null,
+): string {
+  switch (getRenderErrorType(error)) {
+    case 'webgl_context':
+      return (
+        getErrorMessage(error) ??
+        'The browser could not create a WebGL2 context for the video renderer.'
+      );
+    case 'draw_frame':
+      return (
+        getErrorMessage(error) ??
+        'The browser failed while drawing a decoded video frame.'
+      );
+    case 'create_filmstrip':
+      return (
+        getErrorMessage(error) ??
+        'The browser failed while building the filmstrip preview.'
+      );
+    default:
+      return getErrorSummary(error);
+  }
 }
 
 /**

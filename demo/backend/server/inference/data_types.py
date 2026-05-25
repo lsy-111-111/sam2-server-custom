@@ -73,6 +73,24 @@ class AddPointsRequest(BaseRequest):
 
 @dataclass_json
 @dataclass
+class AddPointsBatchItem:
+    object_id: int
+    labels: List[int]
+    points: List[List[float]]
+
+
+@dataclass_json
+@dataclass
+class AddPointsBatchRequest(BaseRequest):
+    type: str
+    session_id: str
+    frame_index: int
+    clear_old_points: bool
+    objects: List[AddPointsBatchItem]
+
+
+@dataclass_json
+@dataclass
 class AddMaskRequest(BaseRequest):
     type: str
     session_id: str
@@ -111,6 +129,8 @@ class PropagateInVideoRequest(BaseRequest):
     type: str
     session_id: str
     start_frame_index: int
+    trim_start_frame: Optional[int] = None
+    trim_end_frame_exclusive: Optional[int] = None
 
 
 @dataclass_json

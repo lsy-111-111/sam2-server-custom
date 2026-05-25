@@ -18,7 +18,7 @@ import DesaturateEffect from './DesaturateEffect';
 import {Effect} from './Effect';
 import EraseBackgroundEffect from './EraseBackgroundEffect';
 import OriginalEffect from './OriginalEffect';
-import OverlayEffect from './OverlayEffect';
+import Overlay2DEffect from './Overlay2DEffect';
 import ArrowGLEffect from './ArrowGLEffect';
 import BackgroundBlurEffect from './BackgroundBlurEffect';
 import BurstGLEffect from './BurstGLEffect';
@@ -71,7 +71,7 @@ export default {
   Gradient: new GradientEffect(),
 
   /* Highlights */
-  Overlay: new OverlayEffect(),
+  Overlay: new Overlay2DEffect(),
   EraseForeground: new EraseForegroundGLEffect(),
   Cutout: new CutoutGLEffect(),
   Scope: new ScopeGLEffect(),

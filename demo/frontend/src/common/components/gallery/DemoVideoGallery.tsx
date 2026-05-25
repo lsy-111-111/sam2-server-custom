@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 import {DemoVideoGalleryQuery} from '@/common/components/gallery/__generated__/DemoVideoGalleryQuery.graphql';
+import VideoGalleryServerVideo from '@/common/components/gallery/VideoGalleryServerVideo';
 import VideoGalleryUploadVideo from '@/common/components/gallery/VideoGalleryUploadPhoto';
 import VideoPhoto from '@/common/components/gallery/VideoPhoto';
 import useScreenSize from '@/common/screen/useScreenSize';
-import {VideoData} from '@/demo/atoms';
+import {createReadyVideoData, VideoData} from '@/demo/atoms';
 import {DEMO_SHORT_NAME} from '@/demo/DemoConfig';
 import {fontSize, fontWeight, spacing} from '@/theme/tokens.stylex';
 import stylex from '@stylexjs/stylex';
@@ -56,6 +57,7 @@ const styles = stylex.create({
 type Props = {
   showUploadInGallery?: boolean;
   onSelect?: (video: VideoPhotoData) => void;
+  onSelectServer?: () => void;
   onUpload: (video: VideoData) => void;
   onUploadStart?: () => void;
   onUploadError?: (error: Error) => void;
@@ -65,11 +67,13 @@ type VideoPhotoData = Photo &
   VideoData & {
     poster: string;
     isUploadOption: boolean;
+    isServerOption: boolean;
   };
 
 export default function DemoVideoGallery({
   showUploadInGallery = false,
   onSelect,
+  onSelectServer,
   onUpload,
   onUploadStart,
   onUploadError,
@@ -102,35 +106,51 @@ export default function DemoVideoGallery({
 
   const allVideos: VideoPhotoData[] = useMemo(() => {
     return data.videos.edges.map(video => {
+      const normalizedVideo = createReadyVideoData(video.node);
       return {
-        src: video.node.url,
-        path: video.node.path,
-        poster: video.node.posterPath,
-        posterPath: video.node.posterPath,
-        url: video.node.url,
-        posterUrl: video.node.posterUrl,
-        width: video.node.width,
-        height: video.node.height,
+        src: normalizedVideo.url,
+        poster: normalizedVideo.posterUrl,
         isUploadOption: false,
+        isServerOption: false,
+        ...normalizedVideo,
       } as VideoPhotoData;
     });
   }, [data.videos.edges]);
 
   const shareableVideos: VideoPhotoData[] = useMemo(() => {
-    const filteredVideos = [...allVideos];
+    const leadingOptions: VideoPhotoData[] = [];
 
     if (showUploadInGallery) {
-      const uploadOption = {
+      leadingOptions.push({
         src: '',
         width: 1280,
         height: 720,
         poster: '',
+        posterPath: null,
+        url: '',
+        posterUrl: '',
+        path: null,
+        mode: 'preview',
         isUploadOption: true,
-      } as VideoPhotoData;
-      filteredVideos.unshift(uploadOption);
+        isServerOption: false,
+      });
     }
 
-    return filteredVideos;
+    leadingOptions.push({
+      src: '',
+      width: 1280,
+      height: 720,
+      poster: '',
+      posterPath: null,
+      url: '',
+      posterUrl: '',
+      path: null,
+      mode: 'preview',
+      isUploadOption: false,
+      isServerOption: true,
+    });
+
+    return [...leadingOptions, ...allVideos];
   }, [allVideos, showUploadInGallery]);
 
   const renderPhoto = ({
@@ -146,6 +166,13 @@ export default function DemoVideoGallery({
         onUpload={handleUploadVideo}
         onUploadError={onUploadError}
         onUploadStart={onUploadStart}
+      />
+    ) : video.isServerOption ? (
+      <VideoGalleryServerVideo
+        style={style}
+        onClick={() => {
+          onSelectServer?.();
+        }}
       />
     ) : (
       <VideoPhoto
@@ -187,7 +214,7 @@ export default function DemoVideoGallery({
               </span>
             </h3>
             <p className={descriptionStyle}>
-              You’ll be able to download what you make.
+              You鈥檒l be able to download what you make.
             </p>
           </div>
 

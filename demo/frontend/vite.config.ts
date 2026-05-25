@@ -22,6 +22,11 @@ import babel from 'vite-plugin-babel';
 import relay from 'vite-plugin-relay';
 import {stylexPlugin} from 'vite-plugin-stylex-dev';
 
+const backendProxyTarget =
+  process.env.VITE_BACKEND_PROXY_TARGET ?? 'http://127.0.0.1:7263';
+const frontendHost = process.env.VITE_HOST ?? '127.0.0.1';
+const frontendPort = Number(process.env.VITE_PORT ?? 7262);
+
 export default defineConfig({
   resolve: {
     alias: {
@@ -38,6 +43,63 @@ export default defineConfig({
     relay,
     babel(),
   ],
+  server: {
+    host: frontendHost,
+    port: frontendPort,
+    strictPort: true,
+    proxy: {
+      '/graphql': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/api/uploads': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/api/server-files': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/api/annotations/export': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/api/videos': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/gallery': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/posters': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/uploads': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/propagate_in_video': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+      '/healthy': {
+        target: backendProxyTarget,
+        changeOrigin: true,
+        xfwd: true,
+      },
+    },
+  },
   worker: {
     plugins: () => [relay],
   },

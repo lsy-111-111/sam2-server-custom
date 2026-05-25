@@ -18,12 +18,16 @@ import useToolbarTabs from '@/common/components/toolbar/useToolbarTabs';
 import useVideo from '@/common/components/video/editor/useVideo';
 import {
   activeTrackletObjectIdAtom,
+  DEFAULT_TRIM_RANGE,
+  annotationExportSnapshotAtom,
   frameIndexAtom,
   isPlayingAtom,
   isStreamingAtom,
   sessionAtom,
   streamingStateAtom,
+  trackletObjectNamesAtom,
   trackletObjectsAtom,
+  trimRangeAtom,
 } from '@/demo/atoms';
 import {DEFAULT_EFFECT_LAYERS} from '@/demo/DemoConfig';
 import {useSetAtom} from 'jotai';
@@ -41,7 +45,10 @@ export default function useResetEditor(): State {
   const setSession = useSetAtom(sessionAtom);
   const setActiveTrackletObjectId = useSetAtom(activeTrackletObjectIdAtom);
   const setTrackletObjects = useSetAtom(trackletObjectsAtom);
+  const setTrackletObjectNames = useSetAtom(trackletObjectNamesAtom);
+  const setAnnotationExportSnapshot = useSetAtom(annotationExportSnapshotAtom);
   const setFrameIndex = useSetAtom(frameIndexAtom);
+  const setTrimRange = useSetAtom(trimRangeAtom);
   const setStreamingState = useSetAtom(streamingStateAtom);
   const setIsPlaying = useSetAtom(isPlayingAtom);
   const setIsStreaming = useSetAtom(isStreamingAtom);
@@ -54,9 +61,12 @@ export default function useResetEditor(): State {
 
   const resetEditor = useCallback(() => {
     setFrameIndex(0);
+    setTrimRange(DEFAULT_TRIM_RANGE);
     setSession(null);
     setActiveTrackletObjectId(0);
     setTrackletObjects([]);
+    setTrackletObjectNames({});
+    setAnnotationExportSnapshot(null);
     setStreamingState('none');
     setIsPlaying(false);
     setIsStreaming(false);
@@ -64,9 +74,12 @@ export default function useResetEditor(): State {
     setDemoTabIndex(OBJECT_TOOLBAR_INDEX);
   }, [
     setFrameIndex,
+    setTrimRange,
     setSession,
     setActiveTrackletObjectId,
     setTrackletObjects,
+    setTrackletObjectNames,
+    setAnnotationExportSnapshot,
     setStreamingState,
     setIsPlaying,
     setIsStreaming,
@@ -81,9 +94,17 @@ export default function useResetEditor(): State {
       }
       return {...prev, ranPropagation: false};
     });
+    setAnnotationExportSnapshot(null);
+    setTrackletObjectNames({});
     setActiveTrackletObjectId(null);
     resetEffects();
-  }, [setSession, setActiveTrackletObjectId, resetEffects]);
+  }, [
+    setSession,
+    setAnnotationExportSnapshot,
+    setTrackletObjectNames,
+    setActiveTrackletObjectId,
+    resetEffects,
+  ]);
 
   return {resetEditor, resetEffects, resetSession};
 }

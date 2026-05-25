@@ -14,11 +14,14 @@
  * limitations under the License.
  */
 import {getFileName} from '@/common/components/options/ShareUtils';
+import useReportError from '@/common/error/useReportError';
 import {
   EncodingCompletedEvent,
   EncodingStateUpdateEvent,
 } from '@/common/components/video/VideoWorkerBridge';
 import useVideo from '@/common/components/video/editor/useVideo';
+import {trimRangeAtom} from '@/demo/atoms';
+import {useAtomValue} from 'jotai';
 import {MP4ArrayBuffer} from 'mp4box';
 import {useState} from 'react';
 
@@ -27,7 +30,8 @@ type DownloadingState = 'default' | 'started' | 'encoding' | 'completed';
 type State = {
   state: DownloadingState;
   progress: number;
-  download: (shouldSave?: boolean) => Promise<MP4ArrayBuffer>;
+  canDownload: boolean;
+  download: (shouldSave?: boolean) => Promise<MP4ArrayBuffer | null>;
 };
 
 export default function useDownloadVideo(): State {
@@ -36,9 +40,45 @@ export default function useDownloadVideo(): State {
   const [progress, setProgress] = useState<number>(0);
 
   const video = useVideo();
+  const trimRange = useAtomValue(trimRangeAtom);
+  const reportError = useReportError();
 
-  async function download(shouldSave = true): Promise<MP4ArrayBuffer> {
+  const canDownload =
+    video != null &&
+    video.isDecodeComplete &&
+    video.decodedFrameCount === video.numberOfFrames &&
+    (downloadingState === 'default' || downloadingState === 'completed');
+
+  async function download(shouldSave = true): Promise<MP4ArrayBuffer | null> {
+    if (video == null) {
+      return null;
+    }
+
+    if (downloadingState !== 'default' && downloadingState !== 'completed') {
+      return null;
+    }
+
+    if (
+      !video.isDecodeComplete ||
+      video.decodedFrameCount !== video.numberOfFrames
+    ) {
+      reportError(
+        new Error(
+          'Video is still decoding. Please wait until loading finishes before downloading.',
+        ),
+      );
+      return null;
+    }
+
+    const activeVideo = video;
+
     return new Promise(resolve => {
+      function cleanup() {
+        activeVideo.removeEventListener('encodingCompleted', onEncodingComplete);
+        activeVideo.removeEventListener('encodingStateUpdate', onEncodingStateUpdate);
+        activeVideo.removeEventListener('error', onError);
+      }
+
       function onEncodingStateUpdate(event: EncodingStateUpdateEvent) {
         setDownloadingState('encoding');
         setProgress(event.progress);
@@ -51,23 +91,25 @@ export default function useDownloadVideo(): State {
           saveVideo(file, getFileName());
         }
 
-        video?.removeEventListener('encodingCompleted', onEncodingComplete);
-        video?.removeEventListener(
-          'encodingStateUpdate',
-          onEncodingStateUpdate,
-        );
+        cleanup();
         setDownloadingState('completed');
         resolve(file);
       }
 
-      video?.addEventListener('encodingStateUpdate', onEncodingStateUpdate);
-      video?.addEventListener('encodingCompleted', onEncodingComplete);
-
-      if (downloadingState === 'default' || downloadingState === 'completed') {
-        setDownloadingState('started');
-        video?.pause();
-        video?.encode();
+      function onError() {
+        cleanup();
+        setDownloadingState('default');
+        setProgress(0);
+        resolve(null);
       }
+
+      activeVideo.addEventListener('encodingStateUpdate', onEncodingStateUpdate);
+      activeVideo.addEventListener('encodingCompleted', onEncodingComplete);
+      activeVideo.addEventListener('error', onError);
+
+      setDownloadingState('started');
+      activeVideo.pause();
+      activeVideo.encode(trimRange);
     });
   }
 
@@ -84,5 +126,5 @@ export default function useDownloadVideo(): State {
     window.URL.revokeObjectURL(url);
   }
 
-  return {download, progress, state: downloadingState};
+  return {download, progress, state: downloadingState, canDownload};
 }
